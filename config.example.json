@@ -1,0 +1,7 @@
+{
+  "engine_python": "C:\\Python312\\python.exe",
+  "engine_root": "C:\\Projects\\spd-decap-pi-evaluator",
+  "data_dir": "D:\\SPD-Data",
+  "laptop_receipts": "D:\\Laptop-Receipts",
+  "laptop_freeze": "D:\\Laptop-Receipts\\laptop_pip_freeze_system_python.txt"
+}

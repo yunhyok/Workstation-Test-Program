@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+build/
+dist/
+output/
+work/
+*.log
+*.token
+config.json
+*.spd
+*.s*p
+*.npz
+*.pkl
+*.junit.xml
+!config.example.json
