@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "kind": "program_release_validation",
+  "version": "1.0.0",
+  "created_at": "2026-09-21T01:21:00.183857+00:00",
+  "program_status": "PASS",
+  "workstation_study_status": "NOT_RUN",
+  "preregistration_commit": "440935f",
+  "engine_commit": "e5b8b716b115364b30b8201adc61dc3d6deb0e12",
+  "engine_changes": 0,
+  "program_pytest": {
+    "tests": 47,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "engine_datafree_hardware_tests": {
+    "passed": 35,
+    "deselected": 44,
+    "full_engine_gates": false
+  },
+  "installed_checks": {
+    "version": "PASS",
+    "gui_render": "PASS",
+    "validation_selfcheck": "PASS",
+    "agent_selfcheck": "PASS",
+    "uninstall": "PASS",
+    "study_data_preserved": "PASS",
+    "external_engine_env": "PASS",
+    "external_report": "PASS"
+  },
+  "touchstone_reproduction": [
+    {
+      "design": "260729",
+      "frequency_count": 826,
+      "port_count": 92,
+      "rtol": 1e-12,
+      "atol": 0,
+      "pass": true
+    },
+    {
+      "design": "260804",
+      "frequency_count": 826,
+      "port_count": 92,
+      "rtol": 1e-12,
+      "atol": 0,
+      "pass": true
+    },
+    {
+      "design": "s5m6585",
+      "frequency_count": 626,
+      "port_count": 160,
+      "rtol": 1e-12,
+      "atol": 0,
+      "pass": true
+    }
+  ],
+  "installer": {
+    "file": "Workstation-Test-Program-1.0.0-Setup-x64.exe",
+    "bytes": 11113220,
+    "sha256": "9fab6defd779df7ce31431a2540b90d2aef8bf17a2c5e4f0465990aab6f8a85a",
+    "signed": false
+  },
+  "full_engine_gates": {
+    "default": "NOT_RUN",
+    "gpu": "NOT_RUN",
+    "slow": "NOT_RUN"
+  },
+  "workstation_matrix": {
+    "A": "NOT_RUN",
+    "B": "NOT_RUN",
+    "C": "NOT_RUN",
+    "D": "NOT_RUN",
+    "E": "NOT_RUN",
+    "F": "NOT_RUN"
+  },
+  "engine_requirements": [
+    "HardwareProfile.detect does not reflect an actual eight-logical-CPU affinity mask on the development laptop.",
+    "Graceful cancellation is at port boundaries; the engine exposes no frequency-boundary cancellation callback."
+  ],
+  "remaining_hardware_validation": "Target Threadripper/A6000 connection was not supplied. No target workstation benchmark or numerical validation is claimed."
+}
