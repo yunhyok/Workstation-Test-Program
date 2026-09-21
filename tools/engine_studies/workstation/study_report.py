@@ -36,8 +36,6 @@ NON_RECEIPT_NAMES = LEGACY_MAP_NAMES | {"summary.json", "status.json", "env.json
 CPU_LIMITS = {"package": 1e-9, "pcb": 2e-9}
 GPU_LIMITS = {"package": 1e-8, "pcb_full": 1e-6, "pcb_ge_1mhz": 1e-7}
 
-_KNOWN_FAMILY = {"260729": "package", "260804": "package", "s5m6585": "pcb"}
-
 
 class ReceiptError(ValueError):
     """A receipt lacks evidence needed for a numerical comparison."""
@@ -75,7 +73,7 @@ def _load_legacy_map(directory: Path) -> tuple[dict[str, dict[str, Any]], list[s
 
         {"schema_version": 1, "verified": true,
          "receipts": {"old.json": {"sha256": "...", "numerics_id": "...",
-                                      "design": "260729", "family": "package",
+                                      "design": "design_a", "family": "package",
                                       "backend": "splu", "threads": 1}}}
     """
     errors: list[str] = []
@@ -139,9 +137,7 @@ def _family(rec: dict[str, Any], mapped: dict[str, Any], design: str | None) -> 
         text = _text(value)
         if text and text.casefold() in {"package", "pcb"}:
             return text.casefold()
-    # These are the three frozen, reproduced W15 design identifiers.  No fuzzy
-    # matching is done; new designs must say which contract applies.
-    return _KNOWN_FAMILY.get(design or "")
+    return None
 
 
 def _backend(rec: dict[str, Any], mapped: dict[str, Any]) -> str | None:
@@ -1086,6 +1082,8 @@ def _write_korean_report(path: Path, summary: dict[str, Any]) -> None:
         lines.append(f"- 실제 탐지 GPU: {summary['environment']['gpu']}")
     lines.extend([
         "- `detected` 프로필은 실제 탐지값이며 `laptop`/`workstation`과 RAM·VRAM 변형 프로필은 플래너 에뮬레이션이다.",
+        "- CPU affinity는 가장 낮은 번호의 논리 CPU `n`개를 선택한다. NUMA 노드나 CCD 한쪽에 집중되거나 SMT 형제 스레드가 함께 선택될 수 있으므로 C의 시간 측정은 토폴로지 중립 결과가 아니다.",
+        "- 프로세스당 VRAM 추정은 배치 시작 전 유휴 표본 5개의 중앙값을 기준선으로 삼고 `(전체 GPU peak - 유휴 중앙값) / 동시 worker 수`로 계산한다. 다른 GPU 작업과 worker별 peak 차이 때문에 개별 프로세스 귀속에는 한계가 있다.",
         "",
         "## A–F 결과",
         "",

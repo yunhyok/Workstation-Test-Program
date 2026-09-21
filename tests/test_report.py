@@ -20,9 +20,9 @@ from study_report import compare_directories, make_report  # noqa: E402
 
 def receipt(
     *,
-    design="260729",
+    design="design_a",
     family="package",
-    port="Port1_SITE0",
+    port="PortA",
     backend="splu",
     threads=1,
     jobs=1,
@@ -88,7 +88,7 @@ class CompareDirectoriesTests(unittest.TestCase):
         self.assertFalse(result["pairs"][0]["bit_equal"])
 
     def test_same_case_id_with_cross_identity_is_rejected(self):
-        result = self.compare(receipt(), receipt(design="260804", case_id="case-1"))
+        result = self.compare(receipt(), receipt(design="design_b", case_id="case-1"))
         self.assertFalse(result["pass"])
         self.assertFalse(result["pairs"][0]["identity_match"])
         self.assertIn("design/port identity mismatch", result["pairs"][0]["errors"])
@@ -103,9 +103,9 @@ class CompareDirectoriesTests(unittest.TestCase):
         self.assertFalse(changed["pairs"][0]["frequency_identical"])
 
     def test_gpu_pcb_uses_full_and_one_mhz_limits(self):
-        base = receipt(design="s5m6585", family="pcb", port="Port1_U1_0", threads=1,
+        base = receipt(design="design_pcb", family="pcb", port="PortPCB", threads=1,
                        z=[1 + 0j, 1 + 0j])
-        gpu = receipt(design="s5m6585", family="pcb", port="Port1_U1_0", backend="cudss",
+        gpu = receipt(design="design_pcb", family="pcb", port="PortPCB", backend="cudss",
                       threads=2, z=[1 + 5e-7, 1 + 5e-8])
         result = self.compare(base, gpu)
         self.assertTrue(result["pass"])
@@ -131,7 +131,7 @@ class CompareDirectoriesTests(unittest.TestCase):
         write_json(self.left / "a.json", receipt())
         write_json(self.right / "b.json", receipt())
         (self.right / "broken.json").write_text("{", encoding="utf-8")
-        write_json(self.left / "extra.json", receipt(port="Port7_SITE0", case_id="extra"))
+        write_json(self.left / "extra.json", receipt(port="PortB", case_id="extra"))
         result = compare_directories(self.left, self.right)
         self.assertFalse(result["pass"])
         self.assertEqual(result["counts"]["malformed"], 1)
@@ -151,7 +151,7 @@ class CompareDirectoriesTests(unittest.TestCase):
 
     def test_legacy_receipt_needs_content_addressed_verified_map(self):
         old = {
-            "tag": "260729", "port": "Port1_SITE0", "freq": [1e5, 1e6],
+            "tag": "design_a", "port": "PortA", "freq": [1e5, 1e6],
             "Z_re": [1.0, 2.0], "Z_im": [1.0, 2.0],
         }
         old_path = self.left / "old.json"; write_json(old_path, old)
@@ -162,13 +162,22 @@ class CompareDirectoriesTests(unittest.TestCase):
         mapping = {
             "schema_version": 1, "verified": True,
             "receipts": {"old.json": {"sha256": digest, "numerics_id": "frozen-numerics",
-                                          "design": "260729", "family": "package",
+                                          "design": "design_a", "family": "package",
                                           "backend": "splu", "threads": 1, "jobs": 1,
                                           "profile": "test"}},
         }
         write_json(self.left / "legacy_receipt_map.json", mapping)
         accepted = compare_directories(self.left, self.right)
         self.assertTrue(accepted["pass"])
+
+    def test_design_family_must_be_explicit_even_for_matching_designs(self):
+        left = receipt()
+        right = receipt()
+        left["study"].pop("family")
+        right["study"].pop("family")
+        result = self.compare(left, right)
+        self.assertFalse(result["pass"])
+        self.assertIn("design family is missing or inconsistent", result["pairs"][0]["errors"])
 
     def test_output_is_never_overwritten(self):
         write_json(self.left / "a.json", receipt())
@@ -180,6 +189,16 @@ class CompareDirectoriesTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
+    def test_report_documents_affinity_and_vram_estimate_limits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_report(root)
+            report_text = (root / "W15_REPORT.md").read_text(encoding="utf-8")
+            self.assertIn("가장 낮은 번호의 논리 CPU", report_text)
+            self.assertIn("NUMA", report_text)
+            self.assertIn("유휴 표본 5개의 중앙값", report_text)
+            self.assertIn("개별 프로세스 귀속에는 한계", report_text)
+
     def test_f_convergence_cases_include_metrics_and_cost_without_new_verdict(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); receipts = root / "receipts"; receipts.mkdir()
@@ -198,7 +217,7 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(result["outcomes"]["F"]["status"], "OBSERVED")
             self.assertEqual(result["convergence_cases"][0]["cost"]["total_wall_seconds"], 8.0)
             report_text = (root / "W15_REPORT.md").read_text(encoding="utf-8")
-            self.assertIn("Port1_SITE0", report_text)
+            self.assertIn("PortA", report_text)
             self.assertIn("0.31", report_text)
 
     def test_gate_fingerprint_mismatch_forces_overall_failure(self):
@@ -265,7 +284,7 @@ class ReportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); receipts = root / "receipts"; receipts.mkdir()
             write_json(root / "matrix_plan.json", {"axes": {"B": {"combinations": [[1, 1], [1, 2]],
-                                                                            "expected_ports": [{"design": "260729", "port": "Port1_SITE0"}]}}})
+                                                                            "expected_ports": [{"design": "design_a", "port": "PortA"}]}}})
             write_json(receipts / "j1.json", receipt(axis="B", jobs=1, case_id="j1"))
             write_json(receipts / "j2.json", receipt(axis="B", jobs=2, case_id="j2"))
             result = make_report(root)
@@ -279,7 +298,7 @@ class ReportTests(unittest.TestCase):
             root = Path(directory); receipts = root / "receipts"; receipts.mkdir()
             write_json(root / "matrix_plan.json", {"axes": {"D": {
                 "plans": {str(v): {} for v in (64, 128, 256, 512)},
-                "expected_ports": [{"design": "260729", "port": "Port1_SITE0"}]}}})
+                "expected_ports": [{"design": "design_a", "port": "PortA"}]}}})
             for value in (64, 128, 256, 512):
                 row = receipt(axis="D", case_id=f"ram{value}")
                 row["study"].update(profile=f"ram{value}", ram_budget_MB=value * .9 * 1024,
@@ -293,7 +312,7 @@ class ReportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); receipts = root / "receipts"; receipts.mkdir()
             write_json(root / "matrix_plan.json", {"axes": {"E": {"synthetic_vram_plans": {},
-                                                                         "expected_ports": [{"design": "260729", "port": "Port1_SITE0"}]}}})
+                                                                         "expected_ports": [{"design": "design_a", "port": "PortA"}]}}})
             cpu = receipt(axis="A", role="cpu_reference", case_id="cpu")
             write_json(receipts / "cpu.json", cpu)
             for jobs in (1, 2, 4, 8):
@@ -333,6 +352,27 @@ class ConverterTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 module.convert_touchstone(source, output)
 
+    def test_port_manifest_cli_preserves_exact_short_port_and_rail_names(self):
+        try:
+            module = importlib.import_module("touchstone_to_zdiag")
+        except ImportError as exc:
+            self.skipTest(f"product touchstone API is unavailable: {exc}")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "input.s2p"
+            output = root / "output.npz"
+            manifest = root / "ports.txt"
+            source.write_text(
+                "! Port[1] = 2nd_SITE0-VDD_A/0\n! Port[2] = 2nd_SITE1-VDD_B/1\n"
+                "# Hz S RI R 50\n1e6 .1 0 0 0 0 0 .2 0\n", encoding="utf-8",
+            )
+            manifest.write_text("PortA::VDD_A/0\nPortB::VDD_B/1\n", encoding="utf-8")
+            code = module.main([str(source), str(output), "--port-manifest", str(manifest)])
+            self.assertEqual(code, 0)
+            with np.load(output, allow_pickle=False) as converted:
+                self.assertEqual(converted["port_names"].tolist(),
+                                 ["PortA::VDD_A/0", "PortB::VDD_B/1"])
+
     def test_legacy_bare_rail_header_requires_exact_external_evidence(self):
         try:
             module = importlib.import_module("touchstone_to_zdiag")
@@ -345,7 +385,7 @@ class ConverterTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 module.convert_touchstone(source, output)
             np.savez(expected, freq=np.asarray([1e6]),
-                     port_names=np.asarray(["Port1_U1_0::VDD/0"]),
+                     port_names=np.asarray(["PortA::VDD/0"]),
                      Zdiag=np.asarray([[50 + 0j]]))
             result = module.convert_touchstone(source, output, against=expected)
             self.assertTrue(result["verified"])

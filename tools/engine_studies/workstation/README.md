@@ -25,12 +25,12 @@
   "schema_version": 1,
   "verified": true,
   "receipts": {
-    "port1.json": {
+    "port_a.json": {
       "sha256": "원본 JSON 파일의 실제 SHA-256 64자리",
       "numerics_id": "동일 옵션의 재현으로 확인한 실제 수치 ID",
-      "design": "260729",
+      "design": "design_a",
       "family": "package",
-      "port": "Port1_SITE0",
+      "port": "PortA",
       "backend": "splu",
       "threads": 4,
       "jobs": 1,

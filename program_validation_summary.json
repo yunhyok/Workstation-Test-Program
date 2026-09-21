@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "kind": "program_release_validation",
+  "version": "1.0.1",
+  "release_state": "PR_CANDIDATE_OWNER_MERGE_REQUIRED",
+  "created_at": "2026-09-21T02:16:58.798893+00:00",
+  "program_status": "PASS",
+  "validation_scope": "local source and Windows installer checks",
+  "workstation_study_status": "NOT_RUN",
+  "base_commit": "f6549eae0b39e3cb9ea918aef84a66a1c33b7d6c",
+  "engine_changes": 0,
+  "engine_worker_changes": 0,
+  "preregistration_changes": 0,
+  "preregistration_sha256": "e58b32f68749c75c24054477bb4a4f80f2b5935fdfd14047eff7f16a282de004",
+  "program_pytest": {
+    "tests": 74,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "self_checks": {
+    "validation": "PASS",
+    "agent": "PASS",
+    "converter": "PASS",
+    "agent_real_env_roundtrip": "PASS"
+  },
+  "external_engine_env": {
+    "source": "PASS",
+    "packaged": "PASS",
+    "hard_version_mismatches": 0
+  },
+  "cpu_fixture_regression": {
+    "frequency_count": 27,
+    "frequency_grid_identical": true,
+    "max_relative_error": 3.231881322361924e-12,
+    "tolerance": 1e-09,
+    "pass": true,
+    "scope": "one existing CPU fixture through the actual engine worker"
+  },
+  "installed_checks": {
+    "version": "PASS",
+    "gui_render": "PASS",
+    "validation_selfcheck": "PASS",
+    "agent_selfcheck": "PASS",
+    "uninstall": "PASS",
+    "study_data_preserved": "PASS"
+  },
+  "bundled_source_files_verified": 10,
+  "installer": {
+    "file": "Workstation-Test-Program-1.0.1-Setup-x64.exe",
+    "bytes": 11124943,
+    "sha256": "9bf0bcc2e4a99f6eae28b7c001c7ba53020f6c5388d7fecaadc4dbcd648a1e0d",
+    "signed": false
+  },
+  "full_engine_gates": {
+    "default": "NOT_RUN",
+    "gpu": "NOT_RUN",
+    "slow": "NOT_RUN"
+  },
+  "workstation_matrix": {
+    "A": "NOT_RUN",
+    "B": "NOT_RUN",
+    "C": "NOT_RUN",
+    "D": "NOT_RUN",
+    "E": "NOT_RUN",
+    "F": "NOT_RUN"
+  },
+  "remaining_hardware_validation": "Target workstation gates and numerical matrix require the owner-provided machine and data.",
+  "operational_limits": [
+    "Graceful cancellation prevents new port launches and waits for every in-flight port in the batch.",
+    "Lowest-n logical CPU affinity may bias NUMA, CCD, and SMT comparisons.",
+    "VRAM is estimated from whole-device peak minus five-sample idle median, divided by concurrency."
+  ],
+  "previous_release": {
+    "version": "1.0.0",
+    "program_pytest_passed": 47,
+    "installer_sha256": "9fab6defd779df7ce31431a2540b90d2aef8bf17a2c5e4f0465990aab6f8a85a"
+  },
+  "evidence_report": "docs/engine/REVIEW_FIXES_20260921.md"
+}

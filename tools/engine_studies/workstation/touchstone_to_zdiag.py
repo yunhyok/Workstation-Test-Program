@@ -63,7 +63,7 @@ def _read_port_names(path: Path, rails: Sequence[str]) -> list[str]:
     Each name may be a short SPD port name or ``short::rail``.  In the latter
     form the rail suffix is checked against the Touchstone header.  A plain
     short-name manifest is useful when the SPD naming convention cannot be
-    reconstructed from a PowerSI rail label (for example ``Port5_SITE0_1721``).
+    reconstructed from a PowerSI rail label (for example ``PortA_variant``).
     """
     text = path.read_text(encoding="utf-8")
     if path.suffix.casefold() == ".json":

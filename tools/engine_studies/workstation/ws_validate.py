@@ -12,6 +12,7 @@ import platform
 import re
 import signal
 import shutil
+import statistics
 import subprocess
 import sys
 import threading
@@ -36,19 +37,14 @@ from common import (RunLock, Settings, atomic_json, input_identity, load_setting
                     compare_receipt_vectors)
 
 
-VERSION = "1.0.0"
-P9 = {
-    "260729": ("Port1_SITE0", "Port7_SITE0", "Port14_SITE0", "Port16_SITE0", "Port18_SITE0",
-               "Port19_SITE0"),
-    "260804": ("Port18_SITE0",),
-    "s5m6585": ("Port1_U1_0", "Port50_U1_0"),
-}
-LARGEST_260729_PORT = "Port49_SITE1"
-REQUIRED_VERSIONS = {
-    "python": "3.12.10", "numpy": "2.4.4", "scipy": "1.18.0", "matplotlib": "3.10.9",
+VERSION = "1.0.1"
+HARD_VERSIONS = {"python": "3.12.10", "numpy": "2.4.4", "scipy": "1.18.0"}
+REFERENCE_VERSIONS = {
+    **HARD_VERSIONS, "matplotlib": "3.10.9",
     "nvmath-python": "1.0.0", "nvidia-cudss-cu12": "0.8.0.10", "cuda-bindings": "12.9.8",
     "cupy-cuda12x": "14.2.0", "shapely": "2.1.2", "pydantic": "2.13.3",
 }
+GPU_VERSION_NAMES = {"nvmath-python", "nvidia-cudss-cu12", "cupy-cuda12x", "cuda-bindings"}
 
 
 def default_root() -> Path:
@@ -66,7 +62,7 @@ class Status:
             "schema_version": 1, "version": VERSION, "running": True, "pid": os.getpid(),
             "subcommand": command, "started_at": utc_now(), "updated_at": utc_now(),
             "current_case": None, "completed": 0, "remaining": 0, "total": 0,
-            "exit_code": None, "stopped_at": None, "error": None,
+            "comparison": None, "exit_code": None, "stopped_at": None, "error": None,
         }
         self._last = 0.0
         self.write(force=True)
@@ -131,6 +127,43 @@ def _kill_tree(process: subprocess.Popen) -> None:
         process.wait(timeout=20)
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"process tree {process.pid} did not exit after forced termination") from exc
+
+
+def _sample_vram_once() -> float | None:
+    command = ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"]
+    try:
+        proc = subprocess.run(command, capture_output=True, text=True, timeout=5)
+        values = [float(value.strip()) for value in proc.stdout.splitlines() if value.strip()]
+        return max(values) if proc.returncode == 0 and values else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def _responsive_wait(seconds: float, stop_file: Path | None, stop_now: bool) -> str | None:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        mode = _stop_mode(stop_file, stop_now)
+        if mode:
+            return mode
+        time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+    return _stop_mode(stop_file, stop_now)
+
+
+def _collect_idle_vram(stop_file: Path | None, stop_now: bool) -> tuple[float | None, list[float], str | None]:
+    samples: list[float] = []
+    for index in range(5):
+        mode = _stop_mode(stop_file, stop_now)
+        if mode:
+            return None, samples, mode
+        sample = _sample_vram_once()
+        if sample is None:
+            return None, [], None
+        samples.append(sample)
+        if index < 4:
+            mode = _responsive_wait(1.0, stop_file, stop_now)
+            if mode:
+                return None, samples, mode
+    return float(statistics.median(samples)), samples, None
 
 
 class VramSampler:
@@ -242,9 +275,24 @@ def _engine_fingerprint(settings: Settings, probe: dict) -> tuple[str, dict]:
     return input_identity(evidence, {})[0], evidence
 
 
+def _version_evidence(probe: dict) -> tuple[dict, dict, list[str]]:
+    actual = {"python": probe.get("python", {}).get("version"), **probe.get("packages", {})}
+    hard_checks = {name: {"required": expected, "actual": actual.get(name),
+                          "pass": actual.get(name) == expected}
+                   for name, expected in HARD_VERSIONS.items()}
+    differences = {name: {"reference": expected, "actual": actual.get(name)}
+                   for name, expected in REFERENCE_VERSIONS.items()
+                   if actual.get(name) != expected}
+    warnings = [f"GPU package differs from reference: {name} "
+                f"{item['actual']!r} (reference {item['reference']!r})"
+                for name, item in differences.items() if name in GPU_VERSION_NAMES]
+    return hard_checks, differences, warnings
+
+
 def command_env(args, status: Status, run_dir: Path, log) -> int:
     record: dict[str, Any] = {"schema_version": 1, "created_at": utc_now(), "ok": False,
-                              "errors": [], "required_versions": REQUIRED_VERSIONS}
+                              "errors": [], "warnings": [], "hard_versions": HARD_VERSIONS,
+                              "reference_versions": REFERENCE_VERSIONS}
     config_path = args.root / "config.json"
     if not config_path.is_file():
         record.update(configured_engine=False, host_python=platform.python_version(),
@@ -268,10 +316,8 @@ def command_env(args, status: Status, run_dir: Path, log) -> int:
                              args.stop_file, args.stop_now)
         record["probe"] = probe
         record["engine_git"] = _git_head(settings.engine_root)
-        actual = {"python": probe["python"]["version"], **probe["packages"]}
-        record["version_checks"] = {name: {"required": expected, "actual": actual.get(name),
-                                                   "pass": actual.get(name) == expected}
-                                    for name, expected in REQUIRED_VERSIONS.items()}
+        checks, differences, warnings = _version_evidence(probe)
+        record.update(version_checks=checks, version_differences=differences, warnings=warnings)
         if settings.laptop_freeze:
             if settings.laptop_freeze.is_file():
                 freeze = {}
@@ -286,7 +332,7 @@ def command_env(args, status: Status, run_dir: Path, log) -> int:
                 }
             else:
                 record["errors"].append(f"laptop_freeze missing: {settings.laptop_freeze}")
-        record["ok"] = all(item["pass"] for item in record["version_checks"].values())
+        record["ok"] = all(item["pass"] for item in checks.values())
         if not record["ok"]:
             record["errors"].append("required Python/package versions do not match")
     except Exception as exc:
@@ -313,17 +359,18 @@ def _required_gate_outcomes(suite: str, cases: list[dict]) -> tuple[bool, dict]:
     reproduction = [c for c in cases if c["classname"].endswith("test_reproduction")]
     passed = [c for c in reproduction if c["state"] == "passed"]
     names = [c["name"] for c in passed]
+    count = lambda pattern: sum(bool(re.match(pattern, name)) for name in names)
     if suite == "default":
-        rules = {"package_cpu": sum(n.startswith("test_variant_p_cases[") for n in names) >= 2,
-                 "pcb_cpu": any(n.startswith("test_pcb_s5m6585[") for n in names),
-                 "reference": any(n.startswith("test_attach_reference_port14") for n in names)}
+        rules = {"package_cpu": count(r"^test_variant(?:_[a-z]+)?_cases\[") >= 2,
+                 "pcb_cpu": count(r"^test_pcb_.+(?<!_gpu)\[") >= 1,
+                 "reference": count(r"^test_attach_reference_") >= 1}
     elif suite == "gpu":
-        rules = {"package_gpu": sum(n.startswith("test_variant_p_cases_gpu[") for n in names) >= 2,
-                 "pcb_gpu": any(n.startswith("test_pcb_s5m6585_gpu[") for n in names)}
+        rules = {"package_gpu": count(r"^test_variant(?:_[a-z]+)?_cases_gpu\[") >= 2,
+                 "pcb_gpu": count(r"^test_pcb_.+_gpu\[") >= 1}
     else:
-        rules = {"legacy": any(n.startswith("test_legacy_port18_1mhz") for n in names),
-                 "package_cpu_all": sum(n.startswith("test_variant_p_cases[") for n in names) >= 7,
-                 "pcb_cpu_all": sum(n.startswith("test_pcb_s5m6585[") for n in names) >= 2}
+        rules = {"legacy": count(r"^test_legacy_") >= 1,
+                 "package_cpu_all": count(r"^test_variant(?:_[a-z]+)?_cases\[") >= 7,
+                 "pcb_cpu_all": count(r"^test_pcb_.+(?<!_gpu)\[") >= 2}
     return all(rules.values()), {"rules": rules, "reproduction_passed": len(passed),
                                 "reproduction_skipped": sum(c["state"] == "skipped" for c in reproduction)}
 
@@ -331,8 +378,7 @@ def _required_gate_outcomes(suite: str, cases: list[dict]) -> tuple[bool, dict]:
 def command_gates(args, status: Status, run_dir: Path, log) -> int:
     settings = load_settings(args.root)
     missing = []
-    for design_id in ("260729", "260804", "s5m6585"):
-        spec = settings.designs[design_id]
+    for design_id, spec in settings.designs.items():
         for kind, path in (("spd", spec.spd), ("reference", spec.reference)):
             if path is None or not path.is_file():
                 missing.append(f"{design_id} {kind}: {path}")
@@ -343,8 +389,15 @@ def command_gates(args, status: Status, run_dir: Path, log) -> int:
         raise RuntimeError("gate data preflight failed: " + "; ".join(missing))
     probe = _call_worker(settings, {"operation": "probe"}, run_dir, "gate-probe", log, status,
                          args.stop_file, args.stop_now)
+    checks, differences, warnings = _version_evidence(probe)
+    result.update(version_checks=checks, version_differences=differences, warnings=warnings)
+    if not all(item["pass"] for item in checks.values()):
+        result["preflight"]["version_mismatch"] = {
+            name: item for name, item in checks.items() if not item["pass"]}
+        atomic_json(args.root / "gates.json", result)
+        return 1
     reference_checks = {}
-    for design_id, ports in P9.items():
+    for design_id, ports in settings.port_sets["P9"].items():
         spec = settings.designs[design_id]
         reference_checks[design_id] = _call_worker(
             settings, {"operation": "reference_check", "reference": str(spec.reference),
@@ -397,8 +450,8 @@ def _measurement_unlocked(settings: Settings, probe: dict) -> None:
     if gates.get("engine_fingerprint") != current:
         raise RuntimeError("measurements are locked: config, engine source, Python, or package versions changed after gates")
     checks = {name: probe.get("python", {}).get("version") if name == "python"
-              else probe.get("packages", {}).get(name) for name in REQUIRED_VERSIONS}
-    wrong = {name: (checks[name], expected) for name, expected in REQUIRED_VERSIONS.items()
+              else probe.get("packages", {}).get(name) for name in HARD_VERSIONS}
+    wrong = {name: (checks[name], expected) for name, expected in HARD_VERSIONS.items()
              if checks[name] != expected}
     if wrong:
         raise RuntimeError(f"measurements are locked: required versions do not match: {wrong}")
@@ -416,37 +469,27 @@ def _measurement_prepare(settings: Settings, args, status: Status, run_dir: Path
     return probe
 
 
-def _ports_for(settings: Settings, label: str, design_filter: str | None, run_dir: Path, log,
-               status: Status, args) -> list[tuple[str, str]]:
-    if label == "P9":
-        if design_filter and design_filter not in P9:
-            spec = settings.designs[design_filter]
-            ports = list(spec.ports)
-            if not ports:
-                value = _call_worker(settings, {"operation": "ports", "spd": str(spec.spd)}, run_dir,
-                                     f"ports-{design_filter}", log, status, args.stop_file, args.stop_now)
-                ports = value["ports"]
-            selected = [(design_filter, p) for p in ports[:9]]
-        else:
-            selected = [(d, p) for d, ports in P9.items() for p in ports]
-    else:
-        design_id = design_filter or "260729"
-        spec = settings.designs[design_id]
-        ports = list(spec.ports)
-        if not ports:
-            value = _call_worker(settings, {"operation": "ports", "spd": str(spec.spd)}, run_dir,
-                                 f"ports-{design_id}", log, status, args.stop_file, args.stop_now)
-            ports = value["ports"]
-        if label == "P20":
-            if design_id == "260729" and LARGEST_260729_PORT in ports:
-                chosen = [p for p in ports if p != LARGEST_260729_PORT][:19] + [LARGEST_260729_PORT]
-            else:
-                chosen = ports[:20]
-            selected = [(design_id, p) for p in chosen]
-        else:
-            selected = [(design_id, p) for p in ports]
+def _ports_for(settings: Settings, label: str, design_filter: str | None,
+               run_dir: Path | None = None, log=None, status: Status | None = None,
+               args=None) -> list[tuple[str, str]]:
+    if label not in settings.port_sets:
+        raise ValueError(f"unknown configured port set {label!r}")
+    if design_filter and design_filter not in settings.designs:
+        raise ValueError(f"unknown configured design {design_filter!r}")
+    mapping = settings.port_sets[label]
     if design_filter:
-        selected = [(d, p) for d, p in selected if d == design_filter]
+        mapping = {design_filter: mapping[design_filter]} if design_filter in mapping else {}
+    selected: list[tuple[str, str]] = []
+    for design_id, configured in mapping.items():
+        if configured == "all":
+            spec = settings.designs[design_id]
+            value = _call_worker(settings, {"operation": "ports", "spd": str(spec.spd)},
+                                 run_dir or settings.root, f"ports-{design_id}", log, status,
+                                 getattr(args, "stop_file", None), getattr(args, "stop_now", False))
+            ports = value.get("ports", [])
+        else:
+            ports = configured
+        selected.extend((design_id, port) for port in dict.fromkeys(ports))
     if not selected:
         raise ValueError(f"port set {label} has no cases for design {design_filter!r}")
     return selected
@@ -515,15 +558,21 @@ def _run_cases(settings: Settings, cases: list[dict], jobs: int, status: Status,
             break
         batch = [pending.popleft() for _ in range(min(max(1, jobs), len(pending)))]
         active = []
+        idle_vram, idle_samples, idle_stop = _collect_idle_vram(args.stop_file, args.stop_now)
+        if idle_stop:
+            stopped = True
+            break
         sampler = VramSampler()
         sampler.start()
-        sample_deadline = time.monotonic() + 2.0
-        while not sampler.samples and time.monotonic() < sample_deadline:
-            time.sleep(0.05)
-        idle_vram = max(sampler.samples[0]["memory_used_MB"]) if sampler.samples else None
         immediate = False
+        stop_after_batch = False
         try:
             for case in batch:
+                mode = _stop_mode(args.stop_file, args.stop_now)
+                if mode:
+                    stop_after_batch = True
+                    immediate = mode == "now"
+                    break
                 request_path, output_path = _worker_paths(run_dir, case["label"])
                 atomic_json(request_path, {**case["request"], "engine_root": str(settings.engine_root)})
                 env = os.environ.copy()
@@ -536,6 +585,9 @@ def _run_cases(settings: Settings, cases: list[dict], jobs: int, status: Status,
                 active.append({"case": case, "process": process, "output": output_path,
                                "started": time.perf_counter(), "started_at": utc_now(),
                                "finished": None, "finished_at": None})
+            if immediate:
+                for item in active:
+                    _kill_tree(item["process"])
             while any(item["process"].poll() is None for item in active):
                 for item in active:
                     if item["finished"] is None and item["process"].poll() is not None:
@@ -601,7 +653,8 @@ def _run_cases(settings: Settings, cases: list[dict], jobs: int, status: Status,
                      "build_seconds": build_seconds, "factor_seconds": factor_seconds,
                      "assemble_seconds": assemble_seconds, "actual_solvers": actual_solvers,
                      "vram_samples_MB": samples, "vram_peak_total_MB": peak,
-                     "vram_idle_total_MB": idle_vram, "vram_delta_MB": delta,
+                     "vram_idle_total_MB": idle_vram, "vram_idle_samples_MB": idle_samples,
+                     "vram_delta_MB": delta,
                      "vram_peak_MB": per_process,
                      "vram_scope": "estimated per-process delta=(whole-GPU peak-idle)/concurrent workers",
                      "source_spd_sha256": case["hashes"]["spd"],
@@ -621,7 +674,7 @@ def _run_cases(settings: Settings, cases: list[dict], jobs: int, status: Status,
             atomic_json(receipt_path(receipts_dir, case["label"], case["identity"]), receipt)
             completed += 1
             executed_success.append(case["identity"])
-        if immediate:
+        if immediate or stop_after_batch:
             stopped = True
             break
         if _stop_mode(args.stop_file, args.stop_now) == "graceful":
@@ -702,6 +755,22 @@ def _compare_external_to_cases(settings: Settings, external: Path, cases: list[d
                         f"compare-{label}", log, status, args.stop_file, args.stop_now)
 
 
+def _write_run_summary(run_dir: Path, value: dict) -> None:
+    path = run_dir / "run_summary.json"
+    if path.exists():
+        raise RuntimeError(f"immutable run summary already exists: {path}")
+    atomic_json(path, {"schema_version": 1, **value})
+
+
+def _comparison_failure(run_dir: Path, name: str, detail: dict) -> str:
+    folder = run_dir / "comparison_failures"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = unique_path(folder / f"{safe_name(name)}.json")
+    atomic_json(path, {"schema_version": 1, "name": name, "created_at": utc_now(),
+                       "detail": detail})
+    return str(path)
+
+
 def command_baseline(args, status: Status, run_dir: Path, log) -> int:
     settings = load_settings(args.root)
     _measurement_prepare(settings, args, status, run_dir, log)
@@ -719,23 +788,63 @@ def command_baseline(args, status: Status, run_dir: Path, log) -> int:
                                    comparison_role=role))
     failures, stopped = _run_cases(settings, cases, args.jobs, status, run_dir, log, args)
     solver_ok = _gpu_cases_used_cudss(settings.root, cases)
-    comparison_ok = False
-    if not stopped and settings.laptop_receipts and settings.laptop_receipts.is_dir():
-        comparison = _compare_external_to_cases(settings, settings.laptop_receipts, cases,
-                                                "baseline", run_dir, log, status, args)
-        comparison_ok = comparison.get("pass") is True
+    comparison_ok = True
+    comparison_state = "not_configured"
+    comparison_failures: list[dict] = []
+    comparisons: list[dict] = []
+
+    def record(name: str, result: dict, *, configured=False) -> None:
+        nonlocal comparison_ok, comparison_state
+        comparisons.append({"name": name, "pass": result.get("pass") is True})
+        if result.get("pass") is True:
+            if configured and comparison_state != "failed":
+                comparison_state = "passed"
+            return
+        comparison_ok = False
+        comparison_state = "failed"
+        comparison_failures.append({"name": name,
+                                    "log": _comparison_failure(run_dir, name, result)})
+
+    def attempt(name: str, function, *, configured=False) -> None:
+        try:
+            result = function()
+        except Exception as exc:
+            result = {"pass": False, "failures": [f"{type(exc).__name__}: {exc}"]}
+        record(name, result, configured=configured)
+
+    if stopped:
+        comparison_state = "stopped"
+    elif settings.laptop_receipts is not None:
+        if settings.laptop_receipts.is_dir():
+            attempt("baseline-laptop-vs-workstation", lambda: _compare_external_to_cases(
+                settings, settings.laptop_receipts, cases, "baseline", run_dir, log, status, args),
+                configured=True)
+        else:
+            record("baseline-laptop-receipts-missing", {
+                "pass": False, "path": str(settings.laptop_receipts),
+                "failures": ["configured laptop_receipts directory is missing"]}, configured=True)
     if not stopped:
         cpu = [c for c in cases if c["identity_request"]["comparison_role"] == "cpu_reference"]
         gpu_first = [c for c in cases if c["identity_request"]["comparison_role"] == "gpu_candidate"]
         gpu_repeat = [c for c in cases if c["identity_request"]["comparison_role"] == "gpu_repeat"]
         if gpu_first:
-            comparison_ok &= _compare_case_sets(settings, cpu, gpu_first, "baseline-cpu-vs-gpu",
-                                                run_dir, log, status, args).get("pass") is True
+            attempt("baseline-cpu-vs-gpu", lambda: _compare_case_sets(
+                settings, cpu, gpu_first, "baseline-cpu-vs-gpu", run_dir, log, status, args))
         if gpu_repeat:
-            comparison_ok &= _compare_case_sets(settings, gpu_first, gpu_repeat,
-                                                "baseline-gpu-repeat", run_dir, log, status,
-                                                args).get("pass") is True
-    return 130 if stopped else (1 if failures or not comparison_ok or not solver_ok else 0)
+            attempt("baseline-gpu-repeat", lambda: _compare_case_sets(
+                settings, gpu_first, gpu_repeat, "baseline-gpu-repeat", run_dir, log, status, args))
+        if not solver_ok:
+            record("baseline-gpu-solver-proof", {
+                "pass": False, "failures": ["GPU cases did not prove the requested GPU solver"]})
+    code = 130 if stopped else (1 if failures or not comparison_ok or not solver_ok else 0)
+    status.update(comparison=comparison_state)
+    _write_run_summary(run_dir, {"command": "baseline", "finished_at": utc_now(),
+                                 "exit_code": code, "comparison": comparison_state,
+                                 "comparison_failures": comparison_failures,
+                                 "comparisons": comparisons,
+                                 "worker_failure_count": failures, "solver_proof": solver_ok,
+                                 "stopped": stopped})
+    return code
 
 
 def _plan(settings, profile, backend, run_dir, log, status, args, affinity=None):
@@ -782,7 +891,7 @@ def command_matrix(args, status: Status, run_dir: Path, log) -> int:
                                        args.profile, axis="B",
                                        comparison_role="cpu_reference" if jobs == 1 else "cpu_candidate"))
     if "C" in axes:
-        c_selected = _ports_for(settings, "P92", args.design or "260729", run_dir, log, status, args)
+        c_selected = _ports_for(settings, "P92", args.design, run_dir, log, status, args)
         plans = {}
         for affinity in (8, 16, 32, 64):
             if affinity > (os.cpu_count() or 1):
@@ -800,7 +909,7 @@ def command_matrix(args, status: Status, run_dir: Path, log) -> int:
         planning["axes"]["C"] = {"plans": plans,
                                    "expected_ports": [{"design": d, "port": p} for d, p in c_selected]}
     if "D" in axes:
-        d_selected = _ports_for(settings, "P92", args.design or "260729", run_dir, log, status, args)
+        d_selected = _ports_for(settings, "P92", args.design, run_dir, log, status, args)
         base = _plan(settings, None, "splu", run_dir, log, status, args)["profile"]
         plans = {}
         for ram in (64, 128, 256, 512):
@@ -815,7 +924,8 @@ def command_matrix(args, status: Status, run_dir: Path, log) -> int:
         planning["axes"]["D"] = {"plans": plans,
                                    "expected_ports": [{"design": d, "port": p} for d, p in d_selected]}
     if "E" in axes:
-        e_selected = _ports_for(settings, "P20", args.design or "260729", run_dir, log, status, args)
+        e_selected = _ports_for(settings, "P20", args.design, run_dir, log, status, args)
+        basis_selected = _ports_for(settings, "E4", args.design, run_dir, log, status, args)
         base = _plan(settings, None, "cudss", run_dir, log, status, args)["profile"]
         plans = {}
         for vram in (8, 24, 48):
@@ -835,10 +945,11 @@ def command_matrix(args, status: Status, run_dir: Path, log) -> int:
                 all_cases.append(_case(settings, "matrix", design_id, port, "cudss", threads, jobs,
                                        f"gpu-jobs{jobs}", axis="E", comparison_role="gpu_candidate"))
         for backend, role in (("splu", "basis_cpu"), ("cudss", "basis_gpu")):
-            all_cases.append(_case(settings, "matrix", "260729", "Port18_SITE0", backend,
-                                   max(1, args.threads), 1, "basis-e4", axis="E",
-                                   comparison_role=role, operation="basis",
-                                   extra={"evidence": "E4 decap basis closure"}))
+            for design_id, port in basis_selected:
+                all_cases.append(_case(settings, "matrix", design_id, port, backend,
+                                       max(1, args.threads), 1, "basis-e4", axis="E",
+                                       comparison_role=role, operation="basis",
+                                       extra={"evidence": "E4 decap basis closure"}))
     planning = _publish_matrix_plan(settings.root, run_dir, planning)
     # Each case records its intended concurrency.  Group by that value so the actual launcher honors it.
     failures = 0
@@ -904,7 +1015,7 @@ def command_matrix(args, status: Status, run_dir: Path, log) -> int:
 def command_converge(args, status: Status, run_dir: Path, log) -> int:
     settings = load_settings(args.root)
     _measurement_prepare(settings, args, status, run_dir, log)
-    selected = _ports_for(settings, args.ports, args.design or "260729", run_dir, log, status, args)
+    selected = _ports_for(settings, args.ports, args.design, run_dir, log, status, args)
     cases = [_case(settings, "converge", d, p, args.backend, args.threads, args.jobs,
                    args.profile, axis="F") for d, p in selected]
     failures, stopped = _run_cases(settings, cases, args.jobs, status, run_dir, log, args)
@@ -976,8 +1087,12 @@ def self_check() -> int:
 def _common(parser, *, defaults=True):
     kw = {} if defaults else {"default": argparse.SUPPRESS}
     parser.add_argument("--root", type=Path, **({"default": default_root()} if defaults else kw))
-    parser.add_argument("--stop-file", type=Path, **({"default": None} if defaults else kw))
-    parser.add_argument("--stop-now", action="store_true", **({"default": False} if defaults else kw))
+    parser.add_argument("--stop-file", type=Path,
+                        help="Stop request file; graceful stops prevent new launches and wait for in-flight jobs",
+                        **({"default": None} if defaults else kw))
+    parser.add_argument("--stop-now", action="store_true",
+                        help="Treat a stop-file request as immediate process-tree termination",
+                        **({"default": False} if defaults else kw))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1042,6 +1157,11 @@ def main(argv=None) -> int:
                 traceback.print_exc(file=log)
                 print(error, file=sys.stderr)
             finally:
+                if not (run_dir / "run_summary.json").exists():
+                    _write_run_summary(run_dir, {"command": args.command, "finished_at": utc_now(),
+                                                 "exit_code": code,
+                                                 "comparison": status.value.get("comparison"),
+                                                 "error": error, "stopped": stopped})
                 status.finish(code, error=error, stopped=stopped)
                 log.close()
     except Exception as exc:

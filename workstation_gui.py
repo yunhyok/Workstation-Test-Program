@@ -67,7 +67,7 @@ class Window:
             ttk.Button(self.settings_tab, text="찾기…", command=lambda v=var, d=directory: self.browse(v, d)).grid(row=row * 2 + 1, column=1, padx=(8, 0))
         self.settings_tab.columnconfigure(0, weight=1)
         ttk.Button(self.settings_tab, text="설정 저장", command=self.save_settings).grid(row=10, column=0, sticky="w", pady=18)
-        ttk.Label(self.settings_tab, text="계산 엔진과 데이터는 별도로 준비합니다. 설치 프로그램은 엔진 수치를 변경하지 않습니다.\nGPU 검증은 NVIDIA 드라이버와 엔진 GPU 의존성이 필요합니다.", wraplength=760).grid(row=11, column=0, columnspan=2, sticky="w")
+        ttk.Label(self.settings_tab, text="계산 엔진과 데이터는 별도로 준비합니다.\n작업 폴더의 config.json에 designs와 port_sets를 입력하세요. 예시는 사용 설명서를 참고하세요.\nGPU 검증은 NVIDIA 드라이버와 엔진 GPU 의존성이 필요합니다.", wraplength=760).grid(row=11, column=0, columnspan=2, sticky="w")
         controls = ttk.Frame(self.run_tab)
         controls.pack(fill="x")
         self.command = tk.StringVar(value="env")
@@ -85,7 +85,7 @@ class Window:
         buttons.pack(fill="x", pady=10)
         self.start_button = ttk.Button(buttons, text="선택 단계 실행 / 재개", command=self.start)
         self.start_button.pack(side="left")
-        ttk.Button(buttons, text="포트 완료 후 중단", command=lambda: self.stop(False)).pack(side="left", padx=8)
+        ttk.Button(buttons, text="실행 중 포트 완료 후 중단", command=lambda: self.stop(False)).pack(side="left", padx=8)
         ttk.Button(buttons, text="즉시 중단", command=lambda: self.stop(True)).pack(side="left")
         ttk.Button(buttons, text="결과 폴더", command=self.open_root).pack(side="right")
         self.status = tk.StringVar(value="준비 · env → gates → baseline → matrix → report 순서로 실행합니다.")
@@ -100,7 +100,7 @@ class Window:
         self.log.configure(yscrollcommand=scrollbar.set)
         self.log.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-        ttk.Label(body, text="중단 단위: 포트 · RAM/VRAM 프로필은 플래너 에뮬레이션 · 전체 측정은 엔진 게이트 통과 후 허용", wraplength=900).pack(anchor="w", pady=(12, 0))
+        ttk.Label(body, text="정상 중단: 실행 중인 배치의 포트 완료 대기 · RAM/VRAM은 플래너 에뮬레이션 · 측정 전 엔진 게이트 필수", wraplength=900).pack(anchor="w", pady=(12, 0))
         self.load_settings()
         self.master.protocol("WM_DELETE_WINDOW", self.close)
         self.master.after(250, self.refresh)
@@ -190,7 +190,7 @@ class Window:
             return
         try:
             (self.root / "gui-stop.request").write_text("now" if now else "graceful", encoding="utf-8")
-            self.status.set("즉시 중단 요청됨" if now else "현재 포트 완료 후 중단 요청됨")
+            self.status.set("즉시 중단 요청됨" if now else "현재 실행 중인 모든 포트 완료 후 중단 요청됨")
         except OSError as exc:
             messagebox.showerror("중단 요청 실패", str(exc))
 

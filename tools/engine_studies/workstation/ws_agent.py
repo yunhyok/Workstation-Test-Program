@@ -28,9 +28,13 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 
-VERSION = "1.0"
+VERSION = "1.0.1"
 MAX_BODY = 64 * 1024
 MAX_TAIL = 10_000
+MIN_TOKEN_LENGTH = 32
+DEFAULT_MAX_ACTIVE = 32
+DEFAULT_LOG_MAX_BYTES = 1_048_576
+DEFAULT_LOG_BACKUPS = 3
 ACTIVE_WORDS = {"running", "starting", "stopping", "active", "in_progress"}
 SUBCOMMANDS = {"baseline", "matrix", "converge", "report", "gates", "env"}
 ARGUMENTS: dict[str, tuple[str, Any]] = {
@@ -42,7 +46,8 @@ ARGUMENTS: dict[str, tuple[str, Any]] = {
     "design": ("--design", None),
     "axis": ("--axis", {"B", "C", "D", "E", "all"}),
 }
-PUBLIC_FILES = {"summary.json", "W15_REPORT.md"}
+PUBLIC_FILES = {"summary.json", "program_validation_summary.json", "W15_REPORT.md",
+                "gates.json", "matrix_plan.json"}
 PUBLIC_DIRECTORIES = {"figures"}
 PUBLIC_SUFFIXES = {".png", ".svg", ".pdf", ".json", ".csv"}
 PRIVATE_ARTIFACT_NAMES = {"config.json", "token", "token.txt", ".token"}
@@ -83,6 +88,8 @@ def read_token(path: Path) -> str:
         raise ValueError(f"cannot read token file {path}: {exc}") from exc
     if not token or "\n" in token or "\r" in token:
         raise ValueError("token file must contain one non-empty token")
+    if len(token) < MIN_TOKEN_LENGTH:
+        raise ValueError(f"token must contain at least {MIN_TOKEN_LENGTH} characters")
     return token
 
 
@@ -327,7 +334,7 @@ class AgentState:
             checked = _label(value, "design")
         except ValueError as exc:
             raise RequestFailure(400, str(exc)) from exc
-        allowed = {"260729", "260804", "s5m6585"}
+        allowed: set[str] = set()
         config = _json_file(self.root / "config.json")
         custom = config.get("designs") if isinstance(config, dict) else None
         if isinstance(custom, dict):
@@ -493,15 +500,27 @@ class AgentState:
 
 
 class AgentHandler(http.server.BaseHTTPRequestHandler):
-    server_version = "ws-agent/1.0"
+    server_version = "ws-agent/1.0.1"
+    timeout = 30
 
     @property
     def state(self) -> AgentState:
         return self.server.agent_state  # type: ignore[attr-defined]
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        # BaseHTTPRequestHandler only supplies request line/status here.  Never log headers.
-        sys.stderr.write("%s - - [%s] %s\n" % (self.client_address[0], self.log_date_time_string(), fmt % args))
+        # Ignore BaseHTTPRequestHandler's request-line argument because it
+        # contains raw query values.  Record only the path and query key names.
+        split = urlsplit(getattr(self, "path", ""))
+        raw_keys = sorted(parse_qs(split.query, keep_blank_values=True))[:16]
+        keys = [re.sub(r"[^A-Za-z0-9_.-]", "?", key)[:64] for key in raw_keys]
+        target = (split.path or "/")[:256]
+        if keys:
+            target += "?keys=" + ",".join(keys)
+        status = str(args[1]) if len(args) > 1 else "-"
+        method = getattr(self, "command", "-")
+        self.server.write_access_log(  # type: ignore[attr-defined]
+            f'{self.client_address[0]} [{self.log_date_time_string()}] "{method} {target}" {status}'
+        )
 
     def _send_json(self, status: int, value: Any) -> None:
         body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -665,13 +684,129 @@ class AgentHandler(http.server.BaseHTTPRequestHandler):
     do_OPTIONS = _unsupported
 
 
+class _BoundedAccessLog:
+    def __init__(self, root: Path, max_bytes: int, backups: int):
+        self.directory = root / "agent-logs"
+        self.path = self.directory / "agent.log"
+        self.max_bytes = max_bytes
+        self.backups = backups
+        self.lock = threading.Lock()
+
+    def write(self, message: str) -> None:
+        data = (message.rstrip("\r\n") + "\n").encode("utf-8", "replace")
+        if len(data) > self.max_bytes:
+            data = data[:max(0, self.max_bytes - 1)] + b"\n"
+        with self.lock:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            current = self.path.stat().st_size if self.path.exists() else 0
+            if current and current + len(data) > self.max_bytes:
+                oldest = self.path.with_name(f"{self.path.name}.{self.backups}")
+                with contextlib.suppress(FileNotFoundError):
+                    oldest.unlink()
+                for index in range(self.backups - 1, 0, -1):
+                    source = self.path.with_name(f"{self.path.name}.{index}")
+                    if source.exists():
+                        os.replace(source, self.path.with_name(f"{self.path.name}.{index + 1}"))
+                os.replace(self.path, self.path.with_name(f"{self.path.name}.1"))
+            with self.path.open("ab") as handle:
+                handle.write(data)
+
+
 class AgentServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], state: AgentState):
-        super().__init__(address, AgentHandler)
+    def __init__(self, address: tuple[str, int], state: AgentState, *,
+                 max_active: int = DEFAULT_MAX_ACTIVE, request_timeout: float | None = None,
+                 log_max_bytes: int = DEFAULT_LOG_MAX_BYTES,
+                 log_backups: int = DEFAULT_LOG_BACKUPS):
+        if max_active < 1:
+            raise ValueError("max_active must be positive")
+        if request_timeout is not None and request_timeout <= 0:
+            raise ValueError("request_timeout must be positive")
+        if log_max_bytes < 1 or log_backups < 1:
+            raise ValueError("log limits must be positive")
+        handler = AgentHandler
+        if request_timeout is not None:
+            handler = type("ConfiguredAgentHandler", (AgentHandler,), {"timeout": request_timeout})
+        self.max_active = max_active
+        self._slots = threading.BoundedSemaphore(max_active)
+        self._active = 0
+        self._active_lock = threading.Lock()
+        self._access_log = _BoundedAccessLog(state.root, log_max_bytes, log_backups)
+        super().__init__(address, handler)
         self.agent_state = state
+
+    @property
+    def active_count(self) -> int:
+        with self._active_lock:
+            return self._active
+
+    def write_access_log(self, message: str) -> None:
+        self._access_log.write(message)
+
+    def process_request(self, request: socket.socket, client_address: tuple[str, int]) -> None:
+        # Admission occurs before ThreadingMixIn creates a thread, so excess
+        # half-open sockets cannot consume unbounded admission threads.
+        if not self._slots.acquire(blocking=False):
+            self._reject_saturated(request, client_address)
+            return
+        with self._active_lock:
+            self._active += 1
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._release_slot()
+            raise
+
+    def process_request_thread(self, request: socket.socket,
+                               client_address: tuple[str, int]) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._release_slot()
+
+    def _release_slot(self) -> None:
+        with self._active_lock:
+            self._active -= 1
+        self._slots.release()
+
+    def _reject_saturated(self, request: socket.socket,
+                          client_address: tuple[str, int]) -> None:
+        body = b'{"error":"server connection limit reached","status":503}'
+        response = (
+            b"HTTP/1.1 503 Service Unavailable\r\n"
+            b"Content-Type: application/json; charset=utf-8\r\n"
+            + f"Content-Length: {len(body)}\r\n".encode("ascii")
+            + b"Connection: close\r\n\r\n" + body
+        )
+        try:
+            # Read an already-available request header so Windows does not
+            # convert close-with-unread-data into an RST that discards the 503.
+            # A half-open peer is held for at most 50 ms and never gets a thread.
+            request.settimeout(0.05)
+            received = b""
+            while len(received) < 8192 and b"\r\n\r\n" not in received:
+                try:
+                    chunk = request.recv(min(4096, 8192 - len(received)))
+                except (TimeoutError, socket.timeout):
+                    break
+                if not chunk:
+                    break
+                received += chunk
+            request.settimeout(0.25)
+            request.sendall(response)
+        except OSError:
+            pass
+        finally:
+            self.write_access_log(f'{client_address[0]} [{_utc_now()}] "- saturated" 503')
+            self.shutdown_request(request)
+
+    def handle_error(self, request: socket.socket,
+                     client_address: tuple[str, int]) -> None:
+        error = sys.exc_info()[0]
+        name = error.__name__ if error is not None else "unknown"
+        self.write_access_log(f"{client_address[0]} [{_utc_now()}] handler_error={name}")
 
 
 def serve(root: Path, bind: str, port: int, token_file: Path, validator: Path | None = None) -> None:
@@ -690,9 +825,10 @@ def _self_check() -> dict[str, Any]:
         root = base / "root"
         root.mkdir()
         token_file = base / "token.txt"
-        token_file.write_text("correct-self-check-token\n", encoding="utf-8")
+        token_value = "correct-self-check-token-0123456789abcdef"
+        token_file.write_text(token_value + "\n", encoding="utf-8")
         bad_token = base / "bad-token.txt"
-        bad_token.write_text("wrong-token\n", encoding="utf-8")
+        bad_token.write_text("wrong-self-check-token-0123456789abcdef\n", encoding="utf-8")
 
         class SelfCheckState(AgentState):
             def _command_for(self, subcommand: str, args: dict[str, Any]) -> list[str]:
@@ -709,10 +845,12 @@ def _self_check() -> dict[str, Any]:
         thread.start()
         url = f"http://127.0.0.1:{server.server_address[1]}"
 
-        def ctl_call(*items: str, token: Path = token_file, expect: int = 0) -> dict[str, Any]:
+        def ctl_call(*items: str, token: Path = token_file,
+                     expect: int | tuple[int, ...] = 0) -> dict[str, Any]:
             prefix = [sys.executable, "ctl"] if getattr(sys, "frozen", False) else [sys.executable, str(ctl)]
             result = subprocess.run([*prefix, "--url", url, "--token-file", str(token), *items, "--json"], capture_output=True, text=True, timeout=15, check=False)
-            if result.returncode != expect:
+            expected = (expect,) if isinstance(expect, int) else expect
+            if result.returncode not in expected:
                 raise RuntimeError(f"ws_ctl {' '.join(items)} returned {result.returncode}: {result.stderr.strip()}")
             line = result.stdout.strip().splitlines()[-1]
             return json.loads(line)
@@ -730,7 +868,7 @@ def _self_check() -> dict[str, Any]:
             stopped_watch = ctl_call("watch", "--interval", "0.05", "--until", "stopped", expect=10)
             from urllib.error import HTTPError
             from urllib.request import Request, urlopen
-            req = Request(url + "/artifact/%2e%2e/config.json", headers={"Authorization": "Bearer correct-self-check-token"})
+            req = Request(url + "/artifact/%2e%2e/config.json", headers={"Authorization": "Bearer " + token_value})
             try:
                 urlopen(req, timeout=3)
             except HTTPError as exc:
@@ -739,7 +877,7 @@ def _self_check() -> dict[str, Any]:
                 traversal = 200
             if traversal != 403:
                 raise RuntimeError(f"path escape returned {traversal}, expected 403")
-            return {
+            result = {
                 "ok": True,
                 "checks": {
                     "health": health.get("ok") is True,
@@ -757,6 +895,36 @@ def _self_check() -> dict[str, Any]:
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+        # Also exercise the actual env dispatcher.  A missing config/engine is
+        # a valid diagnostic result (exit 1); the round trip must still create
+        # runner-owned status.json and env.json without study data.
+        real_root = base / "real-root"
+        real_root.mkdir()
+        real_state = AgentState(real_root, read_token(token_file))
+        real_server = AgentServer(("127.0.0.1", 0), real_state)
+        real_thread = threading.Thread(target=real_server.serve_forever,
+                                       kwargs={"poll_interval": 0.05}, daemon=True)
+        real_thread.start()
+        url = f"http://127.0.0.1:{real_server.server_address[1]}"
+        try:
+            real_start = ctl_call("start", "env")
+            real_status = ctl_call("watch", "--interval", "0.05", expect=(0, 11))
+            real_env = ctl_call("env")
+            result["checks"]["real_env"] = bool(
+                real_start.get("accepted") is True
+                and real_status.get("subcommand") == "env"
+                and real_status.get("running") is False
+                and real_status.get("exit_code") in {0, 1}
+                and isinstance(real_env.get("env"), dict)
+            )
+            result["ok"] = all(value is True or key in {"child_pid", "receipts", "traversal"}
+                               for key, value in result["checks"].items())
+        finally:
+            real_server.shutdown()
+            real_server.server_close()
+            real_thread.join(timeout=2)
+        return result
 
 
 def _self_check_worker(root: Path, stop_file: Path) -> int:

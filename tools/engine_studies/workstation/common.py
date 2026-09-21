@@ -17,6 +17,10 @@ from typing import Any
 SCHEMA_VERSION = 1
 
 
+class ConfigError(ValueError):
+    """Runtime settings are missing or violate the public config contract."""
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -98,25 +102,7 @@ class Settings:
     laptop_receipts: Path | None = None
     laptop_freeze: Path | None = None
     designs: dict[str, DesignSpec] = field(default_factory=dict)
-
-
-DEFAULT_DESIGNS = {
-    "260729": {
-        "spd": "S4LB002-2Para_260729_1_injected.spd",
-        "reference": "S4LB002_260729_Zdiag.npz",
-        "family": "package",
-    },
-    "260804": {
-        "spd": "S4LB002-2Para_260804_1_injected.spd",
-        "reference": "S4LB002_260804_Zdiag.npz",
-        "family": "package",
-    },
-    "s5m6585": {
-        "spd": "s5m6585_32p_260414_length3_1.spd",
-        "reference": "s5m6585_Zdiag.npz",
-        "family": "pcb",
-    },
-}
+    port_sets: dict[str, dict[str, tuple[str, ...] | str]] = field(default_factory=dict)
 
 
 def _resolved(base: Path, raw: str | os.PathLike[str] | None) -> Path | None:
@@ -140,13 +126,13 @@ def load_settings(root: Path, *, require_paths: bool = True) -> Settings:
     try:
         raw = json.loads(config_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
-        raise ValueError(f"missing runtime settings: {config_path}") from exc
+        raise ConfigError(f"missing runtime settings: {config_path}") from exc
     except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"invalid runtime settings {config_path}: {exc}") from exc
+        raise ConfigError(f"invalid runtime settings {config_path}: {exc}") from exc
 
     required = [key for key in ("engine_python", "engine_root", "data_dir") if not raw.get(key)]
     if required:
-        raise ValueError(f"{config_path}: missing required keys: {', '.join(required)}")
+        raise ConfigError(f"{config_path}: missing required keys: {', '.join(required)}")
     engine_python = _resolved(root, raw["engine_python"])
     engine_root = _resolved(root, raw["engine_root"])
     data_dir = _resolved(root, raw["data_dir"])
@@ -160,27 +146,55 @@ def load_settings(root: Path, *, require_paths: bool = True) -> Settings:
         if not data_dir.is_dir():
             errors.append(f"data_dir is not a directory: {data_dir}")
         if errors:
-            raise ValueError("; ".join(errors))
+            raise ConfigError("; ".join(errors))
 
-    merged = dict(DEFAULT_DESIGNS)
-    custom = raw.get("designs", {})
-    if custom is not None and not isinstance(custom, dict):
-        raise ValueError(f"{config_path}: designs must be an object")
-    merged.update(custom or {})
+    custom = raw.get("designs")
+    if not isinstance(custom, dict) or not custom:
+        raise ConfigError(f"{config_path}: designs must be a non-empty object")
     designs: dict[str, DesignSpec] = {}
-    for design_id, item in merged.items():
-        if not isinstance(item, dict) or not item.get("spd"):
-            raise ValueError(f"{config_path}: design {design_id!r} needs an spd path")
-        family = item.get("family", "package")
+    for design_id, item in custom.items():
+        if not isinstance(item, dict) or not item.get("spd") or not item.get("reference"):
+            raise ConfigError(f"{config_path}: design {design_id!r} needs spd and reference paths")
+        family = item.get("family")
         if family not in ("package", "pcb"):
-            raise ValueError(f"{config_path}: design {design_id!r} family must be package or pcb")
+            raise ConfigError(f"{config_path}: design {design_id!r} family must be package or pcb")
+        ports = item.get("ports", [])
+        if ports is not None and (not isinstance(ports, list) or
+                                  any(not isinstance(port, str) or not port for port in ports)):
+            raise ConfigError(f"{config_path}: design {design_id!r} ports must be a list of names")
         designs[str(design_id)] = DesignSpec(
             str(design_id),
             find_data_file(data_dir, item["spd"]),
-            find_data_file(data_dir, item.get("reference")),
+            find_data_file(data_dir, item["reference"]),
             family,
-            tuple(str(p) for p in item.get("ports", ())),
+            tuple(ports or ()),
         )
+    raw_sets = raw.get("port_sets")
+    required_sets = ("P9", "P20", "P92", "E4")
+    if not isinstance(raw_sets, dict) or any(name not in raw_sets for name in required_sets):
+        raise ConfigError(f"{config_path}: port_sets must define {', '.join(required_sets)}")
+    port_sets: dict[str, dict[str, tuple[str, ...] | str]] = {}
+    for set_name in required_sets:
+        mapping = raw_sets[set_name]
+        if not isinstance(mapping, dict) or not mapping:
+            raise ConfigError(f"{config_path}: port_sets.{set_name} must be a non-empty object")
+        normalized: dict[str, tuple[str, ...] | str] = {}
+        for design_id, selection in mapping.items():
+            design_id = str(design_id)
+            if design_id not in designs:
+                raise ConfigError(f"{config_path}: port_sets.{set_name} has unknown design {design_id!r}")
+            if selection == "all":
+                if set_name != "P92":
+                    raise ConfigError(f"{config_path}: only port_sets.P92 may use 'all'")
+                normalized[design_id] = "all"
+            elif (isinstance(selection, list) and selection and
+                  all(isinstance(port, str) and port for port in selection)):
+                normalized[design_id] = tuple(selection)
+            else:
+                raise ConfigError(f"{config_path}: invalid ports for {set_name}.{design_id}")
+        port_sets[set_name] = normalized
+    if sum(len(value) for value in port_sets["E4"].values() if value != "all") != 1:
+        raise ConfigError(f"{config_path}: port_sets.E4 must select exactly one basis port")
     return Settings(
         root=root,
         engine_python=engine_python,
@@ -189,6 +203,7 @@ def load_settings(root: Path, *, require_paths: bool = True) -> Settings:
         laptop_receipts=_resolved(root, raw.get("laptop_receipts")),
         laptop_freeze=_resolved(root, raw.get("laptop_freeze")),
         designs=designs,
+        port_sets=port_sets,
     )
 
 
