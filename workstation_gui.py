@@ -32,9 +32,12 @@ class Window:
         self.child: subprocess.Popen | None = None
         self.log_handle = None
         self.last_status = ""
+        self.last_batch = None
         self.master.title("Workstation Test Program")
-        self.master.geometry("1000x760")
-        self.master.minsize(780, 640)
+        width = min(1100, self.master.winfo_screenwidth() - 80)
+        height = min(860, self.master.winfo_screenheight() - 140)
+        self.master.geometry(f"{width}x{height}+20+20")
+        self.master.minsize(min(960, width), min(740, height))
         style = ttk.Style()
         if "vista" in style.theme_names():
             style.theme_use("vista")
@@ -47,6 +50,8 @@ class Window:
         self.work_label = ttk.Label(body, text=str(self.root), wraplength=850)
         self.work_label.pack(anchor="w")
         ttk.Button(body, text="작업 폴더 변경…", command=self.change_root).pack(anchor="w", pady=(4, 10))
+        ttk.Label(body, text="정상 중단: 실행 중인 배치의 포트 완료 대기 · RAM/VRAM은 플래너 에뮬레이션 · 측정 전 엔진 게이트 필수",
+                  wraplength=900).pack(side="bottom", anchor="w", pady=(12, 0))
         tabs = ttk.Notebook(body)
         tabs.pack(fill="both", expand=True)
         self.run_tab, self.settings_tab = ttk.Frame(tabs, padding=15), ttk.Frame(tabs, padding=15)
@@ -79,19 +84,48 @@ class Window:
             ("매트릭스 축", self.axis, ("all", "B", "C", "D", "E")),
         ]):
             ttk.Label(controls, text=label).grid(row=0, column=column, sticky="w", padx=(0, 12))
-            ttk.Combobox(controls, textvariable=var, values=values, state="readonly", width=18).grid(row=1, column=column, sticky="ew", padx=(0, 12), pady=4)
+            combo = ttk.Combobox(controls, textvariable=var, values=values, state="readonly", width=18)
+            combo.grid(row=1, column=column, sticky="ew", padx=(0, 12), pady=4)
+            if var is self.command:
+                combo.bind("<<ComboboxSelected>>", self.preview_stage)
             controls.columnconfigure(column, weight=1)
+        automatic = ttk.LabelFrame(self.run_tab, text="자동 실행 · 조건을 순서대로 적용", padding=10)
+        automatic.pack(fill="x", pady=(10, 0))
+        self.batch_button = ttk.Button(automatic, text="전체 실험 순차 실행 / 재개",
+                                       command=lambda: self.start_batch("all"))
+        self.batch_button.grid(row=0, column=0, sticky="w", padx=(0, 12))
+        self.stage_button = ttk.Button(automatic, text="선택 단계의 모든 조건 실행 / 재개",
+                                       command=lambda: self.start_batch(self.command.get()))
+        self.stage_button.grid(row=0, column=1, sticky="w")
+        ttk.Label(automatic, text="전체: env → gates → baseline(P9·P92) → matrix(B–E) → converge(P92) → report\n"
+                  "자동 실행은 등록된 조건을 사용합니다. 위 포트·축 선택은 수동 실행에만 적용됩니다.\n"
+                  "전체 측정은 수 시간 이상 걸릴 수 있습니다. 실패·중단 시 다음 단계는 실행하지 않습니다.",
+                  wraplength=800).grid(row=1, column=0, columnspan=2, sticky="w", pady=(7, 0))
         buttons = ttk.Frame(self.run_tab)
         buttons.pack(fill="x", pady=10)
-        self.start_button = ttk.Button(buttons, text="선택 단계 실행 / 재개", command=self.start)
+        self.start_button = ttk.Button(buttons, text="선택 조건 수동 실행 / 재개", command=self.start)
         self.start_button.pack(side="left")
         ttk.Button(buttons, text="실행 중 포트 완료 후 중단", command=lambda: self.stop(False)).pack(side="left", padx=8)
         ttk.Button(buttons, text="즉시 중단", command=lambda: self.stop(True)).pack(side="left")
         ttk.Button(buttons, text="결과 폴더", command=self.open_root).pack(side="right")
-        self.status = tk.StringVar(value="준비 · env → gates → baseline → matrix → report 순서로 실행합니다.")
+        self.status = tk.StringVar(value="준비 · 전체 실험 버튼으로 등록된 모든 단계를 순차 실행할 수 있습니다.")
         ttk.Label(self.run_tab, textvariable=self.status, wraplength=850).pack(anchor="w", pady=5)
         self.progress = ttk.Progressbar(self.run_tab, mode="determinate")
         self.progress.pack(fill="x", pady=(2, 10))
+        self.plan_label = tk.StringVar()
+        ttk.Label(self.run_tab, textvariable=self.plan_label).pack(anchor="w")
+        plan_frame = ttk.Frame(self.run_tab)
+        plan_frame.pack(fill="x", pady=(4, 10))
+        self.plan_tree = ttk.Treeview(plan_frame, columns=("step", "state"), show="headings", height=5)
+        self.plan_tree.heading("step", text="실행 순서 / 조건")
+        self.plan_tree.heading("state", text="상태")
+        self.plan_tree.column("step", width=670, stretch=True)
+        self.plan_tree.column("state", width=110, stretch=False)
+        plan_scroll = ttk.Scrollbar(plan_frame, orient="vertical", command=self.plan_tree.yview)
+        self.plan_tree.configure(yscrollcommand=plan_scroll.set)
+        self.plan_tree.pack(side="left", fill="x", expand=True)
+        plan_scroll.pack(side="right", fill="y")
+        self.show_plan("all")
         ttk.Label(self.run_tab, text="최근 로그").pack(anchor="w")
         log_frame = ttk.Frame(self.run_tab)
         log_frame.pack(fill="both", expand=True, pady=(4, 0))
@@ -100,7 +134,6 @@ class Window:
         self.log.configure(yscrollcommand=scrollbar.set)
         self.log.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-        ttk.Label(body, text="정상 중단: 실행 중인 배치의 포트 완료 대기 · RAM/VRAM은 플래너 에뮬레이션 · 측정 전 엔진 게이트 필수", wraplength=900).pack(anchor="w", pady=(12, 0))
         self.load_settings()
         self.master.protocol("WM_DELETE_WINDOW", self.close)
         self.master.after(250, self.refresh)
@@ -119,7 +152,7 @@ class Window:
         except (ValueError, OSError) as exc:
             messagebox.showerror("설정 읽기 실패", str(exc))
         for key, var in self.fields.items():
-            var.set(config.get(key, ""))
+            var.set(config.get(key) or "")
         if not self.fields["engine_python"].get():
             runtime = (shutil.which("python") or "") if getattr(sys, "frozen", False) else sys.executable
             self.fields["engine_python"].set(runtime)
@@ -150,21 +183,55 @@ class Window:
         selected = filedialog.askdirectory()
         if selected:
             self.root = Path(selected).resolve()
+            self.last_batch = None
             self.work_label.configure(text=str(self.root))
             self.load_settings()
 
     def start(self):
-        if self.child and self.child.poll() is None:
-            return
-        if not self.save_settings():
-            return
         cmd = self.command.get()
-        stop_path = self.root / "gui-stop.request"
-        args = runner_command() + [cmd, "--root", str(self.root), "--stop-file", str(stop_path)]
+        args = [cmd]
         if cmd in ("baseline", "matrix", "converge"):
             args += ["--ports", self.ports.get()]
         if cmd == "matrix":
             args += ["--axis", self.axis.get()]
+        self.launch(args, cmd)
+
+    def start_batch(self, stage: str):
+        if self.child and self.child.poll() is None:
+            return
+        self.show_plan(stage)
+        self.launch(["batch", "--stage", stage], "전체 실험" if stage == "all" else f"{stage} 전체 조건")
+
+    def _set_busy(self, busy: bool):
+        for button in (self.start_button, self.batch_button, self.stage_button):
+            button.configure(state="disabled" if busy else "normal")
+
+    def preview_stage(self, event=None):
+        if not self.child or self.child.poll() is not None:
+            self.show_plan(self.command.get())
+
+    def show_plan(self, stage: str, steps=None):
+        from ws_validate import batch_plan
+        steps = batch_plan(stage) if steps is None else steps
+        self.plan_label.set(f"실행 계획 · {'전체 실험' if stage == 'all' else stage} · {len(steps)}단계")
+        states = {"pending": "대기", "running": "실행 중", "completed": "완료", "failed": "실패", "stopped": "중단"}
+        existing = self.plan_tree.get_children()
+        if list(existing) != [step["id"] for step in steps]:
+            self.plan_tree.delete(*existing)
+            for step in steps:
+                self.plan_tree.insert("", "end", iid=step["id"])
+        for index, step in enumerate(steps, 1):
+            self.plan_tree.item(step["id"], values=(f"{index}. {step['label']}", states.get(step.get("state"), "대기")))
+            if step.get("state") == "running":
+                self.plan_tree.see(step["id"])
+
+    def launch(self, options: list[str], label: str):
+        if self.child and self.child.poll() is None:
+            return
+        if not self.save_settings():
+            return
+        stop_path = self.root / "gui-stop.request"
+        args = runner_command() + options + ["--root", str(self.root), "--stop-file", str(stop_path)]
         try:
             from common import RunLock
             # Check the same lock as CLI/agent before clearing this launcher's old stop request.
@@ -177,11 +244,13 @@ class Window:
             self.child = subprocess.Popen(args, stdout=self.log_handle, stderr=subprocess.STDOUT,
                                           env={**os.environ, "PYTHONUTF8": "1"},
                                           creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
-            self.start_button.configure(state="disabled")
-            self.status.set(f"{cmd} 시작 중…")
+            self._set_busy(True)
+            self.status.set(f"{label} 시작 중…")
         except (OSError, RuntimeError) as exc:
             if self.log_handle:
                 self.log_handle.close()
+                self.log_handle = None
+            self._set_busy(False)
             messagebox.showerror("실행 실패", str(exc))
 
     def stop(self, now: bool):
@@ -205,7 +274,17 @@ class Window:
                 complete = data.get("completed", 0)
                 remaining = data.get("remaining", 0)
                 self.status.set(f"{state} · {data.get('subcommand', '')} · 완료 {complete} / 남음 {remaining} · {data.get('current_case') or ''}")
-                if isinstance(complete, int) and isinstance(remaining, int):
+                batch = data.get("batch")
+                if batch:
+                    if batch != self.last_batch:
+                        self.show_plan(batch["stage"], batch["steps"])
+                        self.last_batch = batch
+                    self.status.set(f"{state} · 단계 {batch['completed']} / {batch['total']} 완료 · "
+                                    f"{data.get('current_case') or batch.get('current_id') or ''} · "
+                                    f"현재 단계 계산 {complete} / {complete + remaining}")
+                if batch:
+                    self.progress.configure(maximum=max(batch["total"], 1), value=batch["completed"])
+                elif isinstance(complete, int) and isinstance(remaining, int):
                     self.progress.configure(maximum=max(complete + remaining, 1), value=complete)
             logs = sorted((self.root / "runs").glob("*/log.txt"))
             logs += sorted((self.root / "launcher-logs").glob("*.txt"))
@@ -225,7 +304,8 @@ class Window:
                 self.child = None
                 if self.log_handle:
                     self.log_handle.close()
-                self.start_button.configure(state="normal")
+                    self.log_handle = None
+                self._set_busy(False)
                 if code:
                     self.status.set(f"종료 코드 {code} · 로그에서 원인을 확인하세요.")
         except (OSError, ValueError):
@@ -254,6 +334,8 @@ def main() -> int:
     if args.smoke:
         root.update()
         assert window.start_button.winfo_exists()
+        assert window.batch_button.winfo_exists() and window.stage_button.winfo_exists()
+        assert len(window.plan_tree.get_children()) == 10
         root.destroy()
         print("GUI smoke PASS")
     else:

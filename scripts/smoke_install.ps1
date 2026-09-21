@@ -1,4 +1,4 @@
-param([string]$Installer = "dist/installer/Workstation-Test-Program-1.0.1-Setup-x64.exe")
+param([string]$Installer = "dist/installer/Workstation-Test-Program-1.1.0-Setup-x64.exe")
 $ErrorActionPreference = "Stop"
 $projectRoot = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
 $installerPath = (Resolve-Path -LiteralPath (Join-Path $projectRoot $Installer)).Path

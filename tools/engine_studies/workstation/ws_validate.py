@@ -37,7 +37,7 @@ from common import (RunLock, Settings, atomic_json, input_identity, load_setting
                     compare_receipt_vectors)
 
 
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 HARD_VERSIONS = {"python": "3.12.10", "numpy": "2.4.4", "scipy": "1.18.0"}
 REFERENCE_VERSIONS = {
     **HARD_VERSIONS, "matplotlib": "3.10.9",
@@ -67,9 +67,9 @@ class Status:
         self._last = 0.0
         self.write(force=True)
 
-    def update(self, **values):
+    def update(self, *, force=False, **values):
         self.value.update(values)
-        self.write()
+        self.write(force=force)
 
     def write(self, force=False):
         now = time.monotonic()
@@ -1043,6 +1043,147 @@ def command_report(args, status: Status, run_dir: Path, log) -> int:
     return 0
 
 
+def batch_plan(stage: str = "all") -> list[dict[str, Any]]:
+    """Return a fresh, public description of the sequential validation campaign."""
+    plan = [
+        {"id": "env", "label": "환경 확인", "argv": ["env"]},
+        {"id": "gates", "label": "필수 게이트", "argv": ["gates"]},
+        {"id": "baseline-p9", "label": "기준선 P9 · CPU / GPU 2회", "argv": ["baseline", "--ports", "P9"]},
+        {"id": "baseline-p92", "label": "기준선 P92 · CPU / GPU 2회", "argv": ["baseline", "--ports", "P92"]},
+        {"id": "matrix-b", "label": "B · 스레드 × 프로세스 · P9", "argv": ["matrix", "--axis", "B", "--ports", "P9"]},
+        {"id": "matrix-c", "label": "C · 논리 CPU 8/16/32/64 · P92", "argv": ["matrix", "--axis", "C", "--ports", "P92"]},
+        {"id": "matrix-d", "label": "D · RAM 64/128/256/512 GB 플래너 · P92", "argv": ["matrix", "--axis", "D", "--ports", "P92"]},
+        {"id": "matrix-e", "label": "E · GPU 동시성 / VRAM / 기저 · P20", "argv": ["matrix", "--axis", "E", "--ports", "P20"]},
+        {"id": "converge", "label": "F · 수렴성 fine · P92", "argv": ["converge", "--ports", "P92"]},
+        {"id": "report", "label": "보고서 생성", "argv": ["report"]},
+    ]
+    choices = {"all", "env", "gates", "baseline", "matrix", "converge", "report"}
+    if stage not in choices:
+        raise ValueError(f"unknown batch stage {stage!r}")
+    if stage == "all":
+        return plan
+    return [step for step in plan if step["argv"][0] == stage]
+
+
+def command_batch(args, status: Status, run_dir: Path, log) -> int:
+    plan = batch_plan(args.stage)
+    steps = [{**step, "argv": list(step["argv"]), "state": "pending", "exit_code": None,
+              "run_dir": None, "error": None} for step in plan]
+    batch = {"stage": args.stage, "completed": 0, "total": len(steps),
+             "current_id": None, "steps": steps}
+    started_at = utc_now()
+
+    def persist(*, running: bool, exit_code: int | None) -> None:
+        batch_error = next((step["error"] for step in steps
+                            if step["state"] in {"failed", "stopped"} and step["error"]), None)
+        status.update(force=True, batch=batch, error=batch_error)
+        atomic_json(args.root / "batch_status.json", {
+            "schema_version": 1, "version": VERSION, "updated_at": utc_now(),
+            "running": running, "exit_code": exit_code, "error": batch_error,
+            "batch_run_dir": str(run_dir), "batch": batch,
+        })
+
+    persist(running=True, exit_code=None)
+    final_code = 0
+    for index, step in enumerate(steps):
+        mode = _stop_mode(args.stop_file, args.stop_now)
+        if mode:
+            final_code = 130
+            step.update(state="stopped", exit_code=130,
+                        error=f"{mode} stop requested before step launch")
+            batch["current_id"] = step["id"]
+            persist(running=True, exit_code=None)
+            break
+
+        step.update(state="running", error=None)
+        batch["current_id"] = step["id"]
+        status.value.update(batch=batch, current_case=None, completed=0, remaining=0,
+                            total=0, comparison=None, error=None)
+        persist(running=True, exit_code=None)
+        print(f"batch step {step['id']} started: {step['label']}", file=log)
+        child_args = None
+        child_run_dir = None
+        child_log = None
+        code = 1
+        error = None
+        traceback_text = None
+        try:
+            child_args = build_parser().parse_args(step["argv"])
+            child_args.root = args.root
+            child_args.stop_file = args.stop_file
+            child_args.stop_now = args.stop_now
+            child_run_dir, child_log = _new_run(args.root, f"batch-{step['id']}")
+            step["run_dir"] = str(child_run_dir)
+            persist(running=True, exit_code=None)
+            code = COMMANDS[child_args.command](child_args, status, child_run_dir, child_log)
+            if child_args.command == "env" and code == 0:
+                env_record = read_json(args.root / "env.json", {})
+                if env_record.get("ok") is not True:
+                    code = 1
+                    error = "env.json did not report ok=true"
+            if code == 0 and index == len(steps) - 1:
+                mode = _stop_mode(args.stop_file, args.stop_now)
+                if mode:
+                    code = 130
+                    error = f"{mode} stop requested before batch completion"
+        except KeyboardInterrupt as exc:
+            code = 130
+            error = str(exc) or "interrupted"
+        except Exception as exc:
+            code = 1
+            error = f"{type(exc).__name__}: {exc}"
+            traceback_text = traceback.format_exc()
+        finally:
+            if error is None and code != 0:
+                error = f"step returned exit code {code}"
+            if child_run_dir is None:
+                child_run_dir = unique_path(run_dir / "failed-steps" / safe_name(step["id"]))
+                child_run_dir.mkdir(parents=True)
+                step["run_dir"] = str(child_run_dir)
+            if child_log is None:
+                child_log = (child_run_dir / "log.txt").open("a", encoding="utf-8", buffering=1)
+            if traceback_text:
+                child_log.write(traceback_text)
+            if not (child_run_dir / "run_summary.json").exists():
+                _write_run_summary(child_run_dir, {
+                    "command": child_args.command if child_args else step["argv"][0],
+                    "batch_step_id": step["id"],
+                    "finished_at": utc_now(), "exit_code": code,
+                    "comparison": status.value.get("comparison"), "error": error,
+                    "stopped": code == 130,
+                })
+            child_log.close()
+
+        step["exit_code"] = code
+        step["error"] = error
+        status.value.update(current_case=None, completed=0, remaining=0, total=0)
+        if code == 0:
+            step["state"] = "completed"
+            batch["completed"] += 1
+            batch["current_id"] = None
+            persist(running=True, exit_code=None)
+            continue
+        step["state"] = "stopped" if code == 130 else "failed"
+        final_code = 130 if code == 130 else 1
+        persist(running=True, exit_code=None)
+        print(f"batch step {step['id']} {step['state']}: {error}", file=log)
+        break
+
+    batch["current_id"] = None
+    finished_at = utc_now()
+    summary_path = run_dir / "batch_summary.json"
+    if summary_path.exists():
+        raise RuntimeError(f"immutable batch summary already exists: {summary_path}")
+    atomic_json(summary_path, {"schema_version": 1, "version": VERSION,
+                               "started_at": started_at, "finished_at": finished_at,
+                               "exit_code": final_code,
+                               "error": next((step["error"] for step in steps
+                                              if step["state"] in {"failed", "stopped"}), None),
+                               "batch": batch})
+    persist(running=False, exit_code=final_code)
+    return final_code
+
+
 def self_check() -> int:
     import tempfile
     checks = {}
@@ -1103,6 +1244,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
     for name in ("env", "gates", "report"):
         child = sub.add_parser(name); _common(child, defaults=False)
+    batch = sub.add_parser("batch"); _common(batch, defaults=False)
+    batch.add_argument("--stage", choices=("all", "env", "gates", "baseline", "matrix",
+                                            "converge", "report"), default="all")
     def measurement(name):
         child = sub.add_parser(name); _common(child, defaults=False)
         child.add_argument("--ports", choices=("P9", "P20", "P92"), default="P9" if name == "baseline" else "P20")
@@ -1123,7 +1267,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 COMMANDS = {"env": command_env, "gates": command_gates, "baseline": command_baseline,
             "matrix": command_matrix, "converge": command_converge,
-            "compare": command_compare, "report": command_report}
+            "compare": command_compare, "report": command_report, "batch": command_batch}
 
 
 def main(argv=None) -> int:
@@ -1150,6 +1294,8 @@ def main(argv=None) -> int:
             try:
                 code = COMMANDS[args.command](args, status, run_dir, log)
                 stopped = code == 130
+                if code and args.command == "batch":
+                    error = status.value.get("error")
             except KeyboardInterrupt as exc:
                 code, stopped, error = 130, True, str(exc) or "interrupted"
             except Exception as exc:

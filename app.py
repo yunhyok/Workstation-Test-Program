@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import sys
 
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 BASE = Path(__file__).resolve().parent
 SCRIPTS = BASE / "tools" / "engine_studies" / "workstation"
 sys.path.insert(0, str(SCRIPTS))

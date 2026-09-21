@@ -28,7 +28,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 MAX_BODY = 64 * 1024
 MAX_TAIL = 10_000
 MIN_TOKEN_LENGTH = 32
@@ -500,7 +500,7 @@ class AgentState:
 
 
 class AgentHandler(http.server.BaseHTTPRequestHandler):
-    server_version = "ws-agent/1.0.1"
+    server_version = "ws-agent/1.1.0"
     timeout = 30
 
     @property

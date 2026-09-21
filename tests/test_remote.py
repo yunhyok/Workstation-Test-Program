@@ -184,7 +184,7 @@ class LiveAgent(unittest.TestCase):
 
 class CommandLineTests(unittest.TestCase):
     def test_remote_protocol_version(self):
-        self.assertEqual(agent.VERSION, "1.0.1")
+        self.assertEqual(agent.VERSION, "1.1.0")
 
     def test_real_ws_validate_env_through_agent(self):
         if importlib.util.find_spec("spd_pi_engine") is None:

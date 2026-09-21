@@ -3,14 +3,15 @@
 SPD PI 계산 엔진의 기계 간 수치 재현성과 CPU/GPU 자원 계획을 검증하는 Windows 프로그램.
 GUI, 검증 CLI, Bearer 인증 LAN 에이전트, 노트북 제어 CLI를 제공합니다.
 
-1.0.1 변경: baseline 종료 상태, 로컬 설계 설정, 에이전트 연결 제한, 버전 잠금과 운용 지적을 수정했습니다. 현재 PR의 설치 후보이며 병합은 소유자가 진행합니다.
+1.1.0 변경: 전체 실험·단계별 모든 조건 순차 실행 버튼, 단계 목록과 중단·재개를 추가했습니다. 현재 PR의 설치 후보이며 병합은 소유자가 진행합니다.
+1.0.1 변경: baseline 종료 상태, 로컬 설계 설정, 에이전트 연결 제한, 버전 잠금과 운용 지적을 수정했습니다.
 
 ## 설치하고 시작하기
 
 1. [Releases](https://github.com/yunhyok/Workstation-Test-Program/releases)에서
    해당 버전의 `Workstation-Test-Program-<version>-Setup-x64.exe`를 내려받아 실행합니다.
 2. 작업 폴더에 `config.example.json`을 `config.json`으로 복사하고 소유자가 제공하는 설계·포트 목록을 입력합니다. 시작 메뉴의 **Workstation Test Program**에서 **엔진 연결 설정**을 입력합니다.
-3. **env → gates → baseline → matrix → report** 순서로 실행합니다.
+3. **전체 실험 순차 실행 / 재개**를 누릅니다. 단계별로 실행하려면 실행 단계를 선택하고 **선택 단계의 모든 조건 실행 / 재개**를 누릅니다.
 
 인스톨러는 현재 사용자에게 설치되며 관리자 권한이 필요하지 않습니다.
 앱 실행용 Python/Tk는 포함됩니다. **수치 계산용 Python 3.12.10, 외부 계산 엔진과 GPU
@@ -55,6 +56,47 @@ JSON 경로는 `D:/WS-Work/w15`처럼 `/`를 권장합니다. 역슬래시를 �
 
 소스 실행은 아래 명령의 `WorkstationTest.exe`를 `python app.py`로 바꾸면 됩니다.
 설치 경로의 `WorkstationTest.exe`는 콘솔용, `WorkstationTestProgram.exe`는 GUI용입니다.
+
+## 모든 조건 자동 실행
+
+GUI의 **전체 실험 순차 실행 / 재개**는 아래 10단계를 순서대로 실행합니다.
+**선택 단계의 모든 조건 실행 / 재개**는 선택한 단계에 해당하는 행만 실행합니다.
+예를 들어 baseline은 P9 다음 P92, matrix는 B → C → D → E를 자동 실행합니다.
+실행 목록에 대기·실행 중·완료·실패·중단 상태가 표시됩니다.
+
+| 순서 | 단계 | 자동으로 적용하는 조건 |
+| --- | --- | --- |
+| 1–2 | env → gates | 환경 확인 → 기본/GPU/slow 필수 게이트 |
+| 3–4 | baseline | P9 → P92, 각각 CPU 및 GPU 2회 비교 |
+| 5 | matrix B | P9, threads 1/2/4/8/16 × jobs 1/4/8/15/30, 곱 ≤64 |
+| 6 | matrix C | P92, 논리 CPU affinity 8/16/32/64; 호스트 초과 마스크는 미실행 기록 |
+| 7 | matrix D | P92, RAM 플래너 64/128/256/512 GB |
+| 8 | matrix E | P20 GPU jobs 1/2/4/8, VRAM 플래너 8/24/48 GB, E4 기저 비교 |
+| 9–10 | converge → report | P92 fine 수렴성 → 보고서 생성 |
+
+자동 실행은 소유자가 config.json에 등록한 포트 집합과 위 실험 조건을 사용합니다.
+화면의 포트·축 선택은 **선택 조건 수동 실행 / 재개**에만 적용됩니다.
+전체 실행에는 비용이 큰 선택 실험 F도 포함되어 수 시간 이상 걸릴 수 있습니다.
+설정에 없는 임의 설계나 새로운 수치 조합을 자동으로 추가하지 않습니다.
+
+어느 단계든 실패하거나 중단하면 뒤 단계는 실행하지 않습니다. 단계만 실행할 때도
+측정 단계의 기존 게이트 검사를 통과해야 합니다. 다시 누르면 입력 신원이 일치하는
+완료 영수증을 재사용합니다. 전체 재실행은 env와 gates를 다시 확인하므로 게이트 비용은
+다시 듭니다. 기존 단계 완료 표시만으로 환경 검사를 생략하지 않습니다.
+현재 단계만 재개하려면 해당 단계를 선택해 단계별 버튼을 사용합니다.
+
+```powershell
+.\WorkstationTest.exe validate batch --root D:\WS-Work\w15
+.\WorkstationTest.exe validate batch --stage matrix --root D:\WS-Work\w15
+.\WorkstationTest.exe validate batch --stage baseline --root D:\WS-Work\w15
+```
+
+한 일괄 실행이 끝날 때까지 작업 폴더 잠금을 유지합니다. 중단 버튼은 현재 계산과
+다음 단계 모두에 적용됩니다. `batch_status.json`은 최신 일괄 상태이며,
+`runs/<실행>/batch_summary.json`과 각 단계의 별도 실행 폴더에 결과·로그를 남깁니다.
+이 기능은 GUI와 로컬 CLI에서 사용합니다. LAN 에이전트의 기존 명령 허용 목록은 유지합니다.
+
+### 수동 CLI 실행
 
 ```powershell
 .\WorkstationTest.exe validate env --root D:\WS-Work\w15
@@ -212,7 +254,7 @@ python -m pip install -r requirements-build.txt
 
 빌드 도구: [PyInstaller spec](https://pyinstaller.org/en/stable/spec-files.html),
 [Inno Setup](https://jrsoftware.org/ishelp/topic_setup_architecturesallowed.htm) 6.3 이상(검증 빌드 7).
-출력은 `dist/installer/Workstation-Test-Program-1.0.1-Setup-x64.exe`입니다.
+출력은 `dist/installer/Workstation-Test-Program-1.1.0-Setup-x64.exe`입니다.
 CPU/GPU 수치 라이브러리는 설치 파일에 중복 포함하지 않고 외부의 고정 환경에서 실행합니다.
 
 사전 등록: [W15_PLAN_20260921.md](docs/engine/W15_PLAN_20260921.md).

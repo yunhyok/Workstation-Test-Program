@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "kind": "program_release_validation",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "release_state": "PR_CANDIDATE_OWNER_MERGE_REQUIRED",
-  "created_at": "2026-09-21T02:16:58.798893+00:00",
+  "created_at": "2026-09-21T23:49:31.901079+00:00",
   "program_status": "PASS",
   "validation_scope": "local source and Windows installer checks",
   "workstation_study_status": "NOT_RUN",
@@ -13,7 +13,7 @@
   "preregistration_changes": 0,
   "preregistration_sha256": "e58b32f68749c75c24054477bb4a4f80f2b5935fdfd14047eff7f16a282de004",
   "program_pytest": {
-    "tests": 74,
+    "tests": 96,
     "failures": 0,
     "errors": 0,
     "skipped": 0
@@ -21,7 +21,6 @@
   "self_checks": {
     "validation": "PASS",
     "agent": "PASS",
-    "converter": "PASS",
     "agent_real_env_roundtrip": "PASS"
   },
   "external_engine_env": {
@@ -35,7 +34,10 @@
     "max_relative_error": 3.231881322361924e-12,
     "tolerance": 1e-09,
     "pass": true,
-    "scope": "one existing CPU fixture through the actual engine worker"
+    "scope": "one existing CPU fixture through the actual engine worker",
+    "verified_in_version": "1.0.1",
+    "worker_unchanged": true,
+    "rerun_for_current_version": false
   },
   "installed_checks": {
     "version": "PASS",
@@ -47,9 +49,9 @@
   },
   "bundled_source_files_verified": 10,
   "installer": {
-    "file": "Workstation-Test-Program-1.0.1-Setup-x64.exe",
-    "bytes": 11124943,
-    "sha256": "9bf0bcc2e4a99f6eae28b7c001c7ba53020f6c5388d7fecaadc4dbcd648a1e0d",
+    "file": "Workstation-Test-Program-1.1.0-Setup-x64.exe",
+    "bytes": 11138054,
+    "sha256": "fad5a58b541d0ed559b5aad9c7c0bace2768bf7075a94953db62808a81e736dd",
     "signed": false
   },
   "full_engine_gates": {
@@ -76,5 +78,20 @@
     "program_pytest_passed": 47,
     "installer_sha256": "9fab6defd779df7ce31431a2540b90d2aef8bf17a2c5e4f0465990aab6f8a85a"
   },
-  "evidence_report": "docs/engine/REVIEW_FIXES_20260921.md"
+  "evidence_report": "docs/engine/BATCH_RUN_20260922.md",
+  "batch": {
+    "ordered_stages": 10,
+    "runner_regression_tests": 12,
+    "gui_regression_tests": 10,
+    "real_engine_env_source": "PASS",
+    "real_engine_env_packaged": "PASS",
+    "gui_button_interactions": "PASS",
+    "full_workstation_campaign": "NOT_RUN"
+  },
+  "review_fixes_report": "docs/engine/REVIEW_FIXES_20260921.md",
+  "previous_converter_self_check": {
+    "version": "1.0.1",
+    "status": "PASS",
+    "implementation_unchanged": true
+  }
 }
