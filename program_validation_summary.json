@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "kind": "program_release_validation",
+  "version": "1.3.0",
+  "release_state": "PR_CANDIDATE_OWNER_MERGE_REQUIRED",
+  "created_at": "2026-09-29T23:40:31.252820+00:00",
+  "program_status": "PASS",
+  "validation_scope": "source regression, dependency-aware batch failures, lossless diagnostic ZIP, installed Windows runtime and real input readiness",
+  "workstation_study_status": "INCOMPLETE_WITH_BASELINE_FAILURE",
+  "engine_source_changes": 0,
+  "numerical_options_changes": 0,
+  "preregistration_changes": 0,
+  "preregistration_sha256": "e58b32f68749c75c24054477bb4a4f80f2b5935fdfd14047eff7f16a282de004",
+  "program_pytest": {
+    "tests": 155,
+    "passed": 154,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 1,
+    "skip_reason": "Windows symlink creation privilege unavailable"
+  },
+  "batch_verification": {
+    "independent_failure_continuation": "PASS",
+    "prerequisite_skips": "PASS",
+    "stop_semantics": "PASS",
+    "aggregate_failure_preserved": "PASS",
+    "report_attempt_after_failure": "PASS"
+  },
+  "result_export": {
+    "autoexport_after_finalization": "PASS",
+    "failure_and_stop_snapshot": "PASS",
+    "no_engine_manual_export": "PASS",
+    "status_preserved_by_manual_export": "PASS",
+    "export_failure_visible": "PASS",
+    "user_snapshot_files_preserved_byte_for_byte": 2009,
+    "running_snapshot_not_mislabeled_complete": "PASS"
+  },
+  "installed_checks": {
+    "version": "1.3.0",
+    "isolated_runtime": "PASS",
+    "folder_prepare": "PASS",
+    "real_design_count": 3,
+    "real_port_count": 344,
+    "env": "PASS",
+    "cpu_gpu_input_gates": "PASS",
+    "failure_zip": "PASS",
+    "manual_export": "PASS",
+    "gui_render": "PASS",
+    "uninstall": "PASS",
+    "study_data_preserved": "PASS"
+  },
+  "icon": {
+    "executable_icon_resolutions": [
+      16,
+      24,
+      32,
+      48,
+      64,
+      128,
+      256
+    ],
+    "gui_cli_resources_verified": true,
+    "installer_icon_configured": true,
+    "tool": "built-in imagegen"
+  },
+  "installer": {
+    "file": "Workstation-Test-Program-1.3.0-Setup-x64.exe",
+    "bytes": 1875279398,
+    "sha256": "59787efd5ccd2a75f1fe8150a5ad260af6ec026ece1f0c30e71e20f2ee25dda1",
+    "signed": false
+  },
+  "observed_owner_workstation_baseline": {
+    "source": "owner-provided incomplete execution archive",
+    "ports": 184,
+    "cpu_gpu_failed": 25,
+    "gpu_repeat_failed": 20,
+    "cpu_gpu_max_relative_error": 4.00856077580908e-06,
+    "gpu_repeat_max_relative_error": 8.394799448409756e-07,
+    "tolerance": 1e-08,
+    "distinct_followup_ports": 25,
+    "numerical_issue_status": "OPEN"
+  },
+  "workstation_matrix": {
+    "A": "BASELINE_COMPARISON_FAILED",
+    "B": "NOT_RUN",
+    "C": "NOT_RUN",
+    "D": "NOT_RUN",
+    "E": "NOT_RUN",
+    "F": "NOT_RUN"
+  },
+  "historical_reproduction": "NOT_RUN",
+  "remaining_hardware_validation": "Fresh numerical diagnosis of 25 failing ports; target-workstation B-F campaign and convergence.",
+  "followup_plan": "docs/engine/FOLLOWUP_20260930.md"
+}

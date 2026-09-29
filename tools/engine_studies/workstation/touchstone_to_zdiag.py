@@ -63,7 +63,7 @@ def _read_port_names(path: Path, rails: Sequence[str]) -> list[str]:
     Each name may be a short SPD port name or ``short::rail``.  In the latter
     form the rail suffix is checked against the Touchstone header.  A plain
     short-name manifest is useful when the SPD naming convention cannot be
-    reconstructed from a PowerSI rail label (for example ``Port5_SITE0_1721``).
+    reconstructed from a PowerSI rail label (for example ``PortA_variant``).
     """
     text = path.read_text(encoding="utf-8")
     if path.suffix.casefold() == ".json":
@@ -84,7 +84,7 @@ def _read_port_names(path: Path, rails: Sequence[str]) -> list[str]:
 
 
 def _against_raw_names(path: Path) -> list[str]:
-    with np.load(path, allow_pickle=True) as expected:
+    with np.load(path, allow_pickle=False) as expected:
         if "port_names" not in expected:
             raise ValueError("against NPZ has no port_names")
         return [str(item) for item in expected["port_names"]]
@@ -103,7 +103,7 @@ def _against_names(path: Path, rails: Sequence[str], names: Sequence[str] | None
 
 
 def _validate_against(freq: np.ndarray, names: Sequence[str], zdiag: np.ndarray, path: Path) -> None:
-    with np.load(path, allow_pickle=True) as expected:
+    with np.load(path, allow_pickle=False) as expected:
         required = {"freq", "port_names", "Zdiag"}
         if not required.issubset(expected.files):
             raise ValueError(f"against NPZ is missing {sorted(required.difference(expected.files))}")

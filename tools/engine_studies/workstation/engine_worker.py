@@ -17,6 +17,10 @@ import hashlib
 from importlib import metadata
 from pathlib import Path
 
+_WORKER_DIR = str(Path(__file__).resolve().parent)
+if _WORKER_DIR not in sys.path:
+    sys.path.insert(0, _WORKER_DIR)
+
 
 def _jsonable(value):
     if dataclasses.is_dataclass(value):
@@ -274,6 +278,198 @@ def op_reference_check(request: dict) -> dict:
     return {"reference": request["reference"], "ports": checked}
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _standalone_design_check(design: dict) -> dict:
+    """Validate one user-supplied design and its reference without judging accuracy."""
+    design_id = str(design.get("design_id", "")).strip() if isinstance(design, dict) else ""
+    result = {"design_id": design_id or None, "status": "failed"}
+    try:
+        import numpy as np
+        from spd_pi_engine import Design
+
+        if not isinstance(design, dict):
+            raise ValueError("each design must be an object")
+        if not design_id:
+            raise ValueError("design_id is required")
+        spd = Path(design["spd"]).resolve()
+        reference = Path(design["reference"]).resolve()
+        if not spd.is_file():
+            raise FileNotFoundError(f"SPD file not found: {spd}")
+        if not reference.is_file():
+            raise FileNotFoundError(f"reference file not found: {reference}")
+
+        selected = design.get("ports")
+        if not isinstance(selected, list) or not selected:
+            raise ValueError("ports must be a non-empty list")
+        selected = [str(port) for port in selected]
+        if len(set(selected)) != len(selected):
+            raise ValueError("selected ports contain duplicates")
+
+        available = [str(port) for port in Design.open(spd).ports()]
+        if not available or len(set(available)) != len(available):
+            raise ValueError("SPD ports must be non-empty and unique")
+        missing_spd = [port for port in selected if port not in available]
+        if missing_spd:
+            raise ValueError(f"selected ports absent from SPD: {missing_spd}")
+
+        with np.load(reference, allow_pickle=False) as data:
+            missing_arrays = [name for name in ("freq", "port_names", "Zdiag") if name not in data]
+            if missing_arrays:
+                raise ValueError(f"reference is missing arrays: {missing_arrays}")
+            freq = np.asarray(data["freq"], dtype=float)
+            raw_names = np.asarray(data["port_names"])
+            zdiag = np.asarray(data["Zdiag"], dtype=complex)
+        if freq.ndim != 1 or not len(freq) or not np.all(np.isfinite(freq)):
+            raise ValueError("reference frequency grid must be a non-empty finite vector")
+        if np.any(np.diff(freq) <= 0):
+            raise ValueError("reference frequency grid must be strictly increasing")
+        if raw_names.ndim != 1:
+            raise ValueError("reference port_names must be a vector")
+        names = [x.decode("utf-8") if isinstance(x, bytes) else str(x) for x in raw_names]
+        short_names = [name.split("::", 1)[0] for name in names]
+        duplicates = sorted({name for name in short_names if short_names.count(name) > 1})
+        if duplicates:
+            raise ValueError(f"reference contains duplicate short port names: {duplicates}")
+        if zdiag.ndim != 2 or zdiag.shape != (len(freq), len(names)):
+            raise ValueError(f"reference Zdiag has invalid shape {zdiag.shape}")
+        if not np.all(np.isfinite(zdiag)):
+            raise ValueError("reference Zdiag contains non-finite values")
+        missing_reference = [port for port in selected if port not in short_names]
+        if missing_reference:
+            raise ValueError(f"selected ports absent from reference: {missing_reference}")
+
+        result.update({
+            "status": "passed",
+            "spd": str(spd),
+            "reference": str(reference),
+            "spd_sha256": _sha256_file(spd),
+            "reference_sha256": _sha256_file(reference),
+            "spd_port_count": len(available),
+            "reference_port_count": len(names),
+            "selected_port_count": len(selected),
+            "frequency_count": len(freq),
+        })
+    except Exception as exc:
+        result["error"] = f"{type(exc).__name__}: {exc}"
+    return result
+
+
+def _captured_check(function, *, require_zero: bool = False) -> dict:
+    import contextlib
+    import io
+
+    output = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            value = function()
+        if require_zero and value != 0:
+            raise RuntimeError(f"self-check returned {value!r}, expected 0")
+        result = {"status": "passed", "output": output.getvalue()[-4000:]}
+        if value is not None:
+            result["details"] = _jsonable(value)
+        return result
+    except Exception as exc:
+        return {"status": "failed", "error": f"{type(exc).__name__}: {exc}",
+                "output": output.getvalue()[-4000:]}
+
+
+def _synthetic_cpu_check() -> dict:
+    """Exercise the engine's sparse pattern and SciPy CPU factorization on synthetic data."""
+    import numpy as np
+    from spd_pi_engine.solver import YPattern
+
+    n = 128
+    diagonal = np.arange(n)
+    rows = np.concatenate((diagonal, diagonal[1:], diagonal[:-1]))
+    cols = np.concatenate((diagonal, diagonal[:-1], diagonal[1:]))
+    values = np.concatenate((np.full(n, 4.0 + 0.25j),
+                             np.full(n - 1, -1.0 + 0.05j),
+                             np.full(n - 1, -1.0 - 0.05j)))
+    matrix = YPattern(rows, cols, n).csc(values)
+    rhs = np.zeros(n, dtype=complex)
+    rhs[n // 3] = 1.0
+
+    from scipy.sparse.linalg import splu
+    solution = splu(matrix, permc_spec="COLAMD").solve(rhs)
+    residual = float(np.max(np.abs(matrix @ solution - rhs)))
+    if not np.all(np.isfinite(solution)) or not np.isfinite(residual) or residual > 1e-11:
+        raise AssertionError(f"synthetic CPU solve residual {residual:.3e}")
+    return {"matrix_size": n, "nnz": int(matrix.nnz), "max_abs_residual": residual,
+            "solver": "scipy.sparse.linalg.splu"}
+
+
+def _standalone_datafree_checks() -> dict:
+    from spd_pi_engine import geometry, hardware, homogenise, receipt, solver, spd_source
+
+    def hardware_check():
+        profile = hardware.HardwareProfile.detect()
+        if profile.cpu_physical < 1 or profile.cpu_logical < profile.cpu_physical:
+            raise AssertionError("invalid detected CPU topology")
+        if profile.ram_total_GB <= 0:
+            raise AssertionError("invalid detected total RAM")
+        plan = hardware.plan_sweep(profile, n_ports=1, solver="splu")
+        if plan.jobs < 1 or plan.threads < 1:
+            raise AssertionError("invalid CPU sweep plan")
+        return plan
+
+    checks = {
+        "parser_api": _captured_check(spd_source.check_parser_api),
+        "homogenise": _captured_check(homogenise.demo, require_zero=True),
+        "solver_pattern": _captured_check(solver.demo),
+        "geometry": _captured_check(geometry.demo),
+        "receipt": _captured_check(receipt.demo),
+        "hardware": _captured_check(hardware_check),
+        "synthetic_cpu": _captured_check(_synthetic_cpu_check),
+    }
+    return checks
+
+
+def _standalone_gpu_check() -> dict:
+    from spd_pi_engine import solver
+
+    result = _captured_check(solver.demo_cudss)
+    result["comparison"] = "cudss_vs_scipy_splu"
+    return result
+
+
+def op_standalone_gate(request: dict) -> dict:
+    checks = _standalone_datafree_checks()
+    requested_designs = request.get("designs")
+    if not isinstance(requested_designs, list) or not requested_designs:
+        designs = [{"design_id": None, "status": "failed",
+                    "error": "designs must be a non-empty list"}]
+    else:
+        designs = [_standalone_design_check(design) for design in requested_designs]
+
+    gpu_requested = bool(request.get("gpu", False))
+    gpu = (_standalone_gpu_check() if gpu_requested else
+           {"status": "not_requested", "requested": False})
+    if gpu_requested:
+        gpu["requested"] = True
+    required = list(checks.values()) + designs + ([gpu] if gpu_requested else [])
+    return {
+        "ok": bool(required) and all(item.get("status") == "passed" for item in required),
+        "gate_kind": "standalone_runtime_and_inputs",
+        "historical_reproduction": "not_run",
+        "accuracy_verification": "baseline_receipts_and_report",
+        "checks": checks,
+        "designs": designs,
+        "gpu": gpu,
+    }
+
+
+def op_prepare(request: dict) -> dict:
+    from data_setup import prepare_data
+    return prepare_data(data_dir=Path(request["data_dir"]), root=Path(request["root"]))
+
+
 def op_report(request: dict) -> dict:
     from study_report import make_report
     return make_report(Path(request["root"]))
@@ -287,7 +483,8 @@ def op_compare(request: dict) -> dict:
 
 OPS = {"probe": op_probe, "ports": op_ports, "solve": op_solve, "converge": op_converge,
        "plan": op_plan, "basis": op_basis, "reference_check": op_reference_check,
-       "report": op_report, "compare": op_compare}
+       "report": op_report, "compare": op_compare, "prepare": op_prepare,
+       "standalone_gate": op_standalone_gate}
 
 
 def main(argv=None) -> int:
