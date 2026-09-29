@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "1.1.0"
+  #define AppVersion "1.2.0"
 #endif
 [Setup]
 AppId={{AC051B97-5D45-4E44-97D6-577D57211AD0}
@@ -15,12 +15,14 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\dist\installer
 OutputBaseFilename=Workstation-Test-Program-{#AppVersion}-Setup-x64
-Compression=lzma2
+Compression=lzma2/fast
+LZMANumBlockThreads=4
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\WorkstationTestProgram.exe
 CloseApplications=yes
 RestartApplications=no
+; CUDA libraries are shared by all experiments; no installer-time downloads.
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]

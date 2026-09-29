@@ -6,6 +6,8 @@ import json
 import math
 import os
 import re
+import sys
+import time
 import tempfile
 import contextlib
 from dataclasses import dataclass, field
@@ -51,7 +53,15 @@ def atomic_json(path: Path, value: Any) -> None:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(raw, path)
+        for attempt in range(8):
+            try:
+                os.replace(raw, path)
+                break
+            except PermissionError:
+                # Windows scanners/readers can briefly deny replacing a freshly written status.
+                if os.name != "nt" or attempt == 7:
+                    raise
+                time.sleep(0.025 * (attempt + 1))
     except BaseException:
         try:
             os.unlink(raw)
@@ -103,6 +113,31 @@ class Settings:
     laptop_freeze: Path | None = None
     designs: dict[str, DesignSpec] = field(default_factory=dict)
     port_sets: dict[str, dict[str, tuple[str, ...] | str]] = field(default_factory=dict)
+    configuration_mode: str = "manual"
+
+
+def bundled_runtime() -> tuple[Path, Path] | None:
+    """Locate the installer runtime, or the same staged runtime during development."""
+    if getattr(sys, "frozen", False):
+        candidates = [Path(sys.executable).resolve().parent / "engine-runtime"]
+    else:
+        candidates = [Path(__file__).resolve().parents[3] / "build" / "engine-runtime"]
+    for root in candidates:
+        if (root / "python.exe").is_file() and (root / "runtime-manifest.json").is_file():
+            return root / "python.exe", root
+    return None
+
+
+def engine_paths(root: Path, raw: dict) -> tuple[Path, Path]:
+    bundle = bundled_runtime()
+    if bundle and (raw.get("engine_mode") == "bundled" or
+                   not (raw.get("engine_python") and raw.get("engine_root"))):
+        return bundle
+    python = _resolved(root, raw.get("engine_python"))
+    engine = _resolved(root, raw.get("engine_root"))
+    if not python or not engine:
+        raise ConfigError("Bundled engine runtime is missing. Reinstall the standalone installer.")
+    return python, engine
 
 
 def _resolved(base: Path, raw: str | os.PathLike[str] | None) -> Path | None:
@@ -130,11 +165,10 @@ def load_settings(root: Path, *, require_paths: bool = True) -> Settings:
     except (OSError, json.JSONDecodeError) as exc:
         raise ConfigError(f"invalid runtime settings {config_path}: {exc}") from exc
 
-    required = [key for key in ("engine_python", "engine_root", "data_dir") if not raw.get(key)]
+    required = [key for key in ("data_dir",) if not raw.get(key)]
     if required:
         raise ConfigError(f"{config_path}: missing required keys: {', '.join(required)}")
-    engine_python = _resolved(root, raw["engine_python"])
-    engine_root = _resolved(root, raw["engine_root"])
+    engine_python, engine_root = engine_paths(root, raw)
     data_dir = _resolved(root, raw["data_dir"])
     assert engine_python and engine_root and data_dir
     if require_paths:
@@ -156,7 +190,7 @@ def load_settings(root: Path, *, require_paths: bool = True) -> Settings:
         if not isinstance(item, dict) or not item.get("spd") or not item.get("reference"):
             raise ConfigError(f"{config_path}: design {design_id!r} needs spd and reference paths")
         family = item.get("family")
-        if family not in ("package", "pcb"):
+        if family not in (("package", "pcb", "unknown") if raw.get("configuration_mode") == "folder" else ("package", "pcb")):
             raise ConfigError(f"{config_path}: design {design_id!r} family must be package or pcb")
         ports = item.get("ports", [])
         if ports is not None and (not isinstance(ports, list) or
@@ -204,6 +238,7 @@ def load_settings(root: Path, *, require_paths: bool = True) -> Settings:
         laptop_freeze=_resolved(root, raw.get("laptop_freeze")),
         designs=designs,
         port_sets=port_sets,
+        configuration_mode=raw.get("configuration_mode", "manual"),
     )
 
 

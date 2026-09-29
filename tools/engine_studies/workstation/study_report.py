@@ -135,7 +135,7 @@ def _family(rec: dict[str, Any], mapped: dict[str, Any], design: str | None) -> 
     study = _study(rec)
     for value in (mapped.get("family"), study.get("family"), rec.get("family"), rec.get("design_class")):
         text = _text(value)
-        if text and text.casefold() in {"package", "pcb"}:
+        if text and text.casefold() in {"package", "pcb", "unknown"}:
             return text.casefold()
     return None
 
@@ -252,6 +252,7 @@ def _normalise_receipt(path: Path, base: Path, raw: Any, mapping: dict[str, dict
         "repeat": int(study.get("repeat", 0)) if isinstance(study.get("repeat", 0), int) else None,
         "case_id": _text(study.get("case_id")),
         "input_identity": _text(study.get("input_identity")),
+        "gate_fingerprint": _text(study.get("gate_fingerprint")),
         "source_spd_sha256": _text(study.get("source_spd_sha256")) or _text(raw.get("spd_sha256")),
         "source_ref_sha256": _text(study.get("source_ref_sha256")),
         "comparison_group": _text(study.get("comparison_group")),
@@ -375,7 +376,7 @@ def _compare_pair(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]
     if not numerics_match:
         errors.append("numerics_id mismatch")
     family = left["family"] if left["family"] == right["family"] else None
-    if family not in {"package", "pcb"}:
+    if family not in {"package", "pcb", "unknown"}:
         errors.append("design family is missing or inconsistent")
 
     backend_values = {left["backend"], right["backend"]}
@@ -401,9 +402,11 @@ def _compare_pair(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]
         rel = _relative_error(right["z"], left["z"])
         maximum = float(np.max(rel))
         metrics["max_relative_error"] = maximum
-        if category in {"cpu", "basis_cpu"} and family in CPU_LIMITS:
-            limit = 1e-9 if category == "basis_cpu" else CPU_LIMITS[family]
-            check_name = "E4 CPU decap basis" if category == "basis_cpu" else f"E3 CPU {family}"
+        if category in {"cpu", "basis_cpu"} and family in {*CPU_LIMITS, "unknown"}:
+            limit = 1e-9 if category == "basis_cpu" else CPU_LIMITS.get(family, 1e-9)
+            check_name = ("E4 CPU decap basis" if category == "basis_cpu" else
+                          ("E3 CPU unclassified (strict)" if family == "unknown"
+                           else f"E3 CPU {family}"))
             checks.append({"name": check_name, "value": maximum, "limit": limit,
                            "pass": bool(maximum <= limit)})
         elif category == "basis_gpu":
@@ -427,6 +430,10 @@ def _compare_pair(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]
                 band_limit = GPU_LIMITS["pcb_ge_1mhz"]
                 checks.append({"name": "E3 GPU PCB >=1MHz", "value": band, "limit": band_limit,
                                "pass": bool(band <= band_limit)})
+        elif category == "gpu" and family == "unknown":
+            limit = GPU_LIMITS["package"]
+            checks.append({"name": "E3 GPU unclassified (strict)", "value": maximum,
+                           "limit": limit, "pass": bool(maximum <= limit)})
     else:
         errors.append("impedance arrays cannot be aligned")
 
@@ -504,6 +511,10 @@ def compare_directories(left: Path, right: Path, out: Path | None = None) -> dic
             repeats.extend(_compare_pair(candidates[0], rerun) for rerun in reruns)
     passed = (bool(results) and not lbad and not rbad and not lunmatched and not runmatched
               and all(row["pass"] for row in results) and all(row["pass"] for row in repeats))
+    campaign_inputs: dict[str, set[str]] = defaultdict(set)
+    for row in [*lrows, *rrows]:
+        if row.get("gate_fingerprint") and row.get("input_identity"):
+            campaign_inputs[row["gate_fingerprint"]].add(row["input_identity"])
     report = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "kind": "workstation_receipt_comparison",
@@ -518,6 +529,10 @@ def compare_directories(left: Path, right: Path, out: Path | None = None) -> dic
         },
         "pairs": results,
         "repeat_comparisons": repeats,
+        "input_identities_by_gate_fingerprint": {
+            fingerprint: sorted(identities)
+            for fingerprint, identities in sorted(campaign_inputs.items())
+        },
         "malformed_left": lbad,
         "malformed_right": rbad,
         "unmatched_left": [row["relative_path"] for row in lunmatched],
@@ -568,6 +583,7 @@ def _measurement(rec: dict[str, Any], path: Path) -> dict[str, Any]:
     return {
         "path": str(path),
         "case_id": _text(study.get("case_id")),
+        "input_identity": _text(study.get("input_identity")),
         "axis": (_text(study.get("axis")) or "").upper(),
         "design": _design(rec, {}), "family": _family(rec, {}, _design(rec, {})),
         "port": _text(study.get("port")) or _text(rec.get("port")),
@@ -721,14 +737,79 @@ def _load_group_runs(root: Path) -> tuple[list[dict[str, Any]], list[dict[str, s
             and int(value["executed_case_count"]) + int(value["resumed_case_count"]) == int(value["case_count"])
             for value in values
         )
+        fingerprints = {_text(value.get("gate_fingerprint")) for value in values}
+        fingerprints.discard(None)
+        case_identities = set()
+        for value in values:
+            raw_identities = value.get("case_identities")
+            if isinstance(raw_identities, list):
+                case_identities.update(identity for identity in raw_identities
+                                       if isinstance(identity, str) and identity)
         rows.append({
             "group_id": group_id, "axis": newest.get("axis"), "profile": newest.get("profile"),
             "backend": newest.get("backend"), "threads": _positive_int(newest.get("threads")),
             "jobs": _positive_int(newest.get("jobs")), "affinity": newest.get("affinity"),
             "total_wall_seconds": wall if executed else None, "attempts": len(values),
             "case_count": int(newest["case_count"]), "complete": complete,
+            "gate_fingerprint": next(iter(fingerprints)) if len(fingerprints) == 1 else None,
+            "case_identities": sorted(case_identities),
         })
     return rows, bad
+
+
+def _select_folder_campaign(
+    measurements: list[dict[str, Any]], comparisons: list[dict[str, Any]],
+    group_runs: list[dict[str, Any]], current_fingerprint: str | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, int], list[str]]:
+    """Select only evidence that proves membership in the current folder campaign."""
+    counts = {"receipts": 0, "comparisons": 0, "group_runs": 0}
+    errors: list[str] = []
+    if not current_fingerprint:
+        counts.update(receipts=len(measurements), comparisons=len(comparisons),
+                      group_runs=len(group_runs))
+        errors.append("folder campaign has no current gates.engine_fingerprint")
+        return [], [], [], counts, errors
+
+    selected_measurements = [
+        row for row in measurements if row.get("gate_fingerprint") == current_fingerprint
+    ]
+    counts["receipts"] = len(measurements) - len(selected_measurements)
+    eligible_identities = {
+        row["input_identity"] for row in selected_measurements if row.get("input_identity")
+    }
+
+    selected_comparisons = []
+    for comparison in comparisons:
+        if comparison.get("gate_fingerprint") != current_fingerprint:
+            counts["comparisons"] += 1
+            continue
+        mapping = comparison.get("input_identities_by_gate_fingerprint")
+        identities = mapping.get(current_fingerprint) if isinstance(mapping, dict) else None
+        if not isinstance(identities, list) or not identities or not all(
+                isinstance(item, str) and item for item in identities):
+            counts["comparisons"] += 1
+            continue
+        unknown = sorted(set(identities).difference(eligible_identities))
+        if unknown:
+            errors.append(f"current comparison references ineligible input identities: {unknown}")
+            continue
+        selected_comparisons.append(comparison)
+
+    selected_groups = []
+    for group in group_runs:
+        if group.get("gate_fingerprint") != current_fingerprint:
+            counts["group_runs"] += 1
+            continue
+        identities = group.get("case_identities")
+        if not isinstance(identities, list) or not identities:
+            counts["group_runs"] += 1
+            continue
+        unknown = sorted(set(identities).difference(eligible_identities))
+        if unknown:
+            errors.append(f"current group run references ineligible input identities: {unknown}")
+            continue
+        selected_groups.append(group)
+    return (selected_measurements, selected_comparisons, selected_groups, counts, errors)
 
 
 def _same_numerical_identity(a: dict[str, Any], b: dict[str, Any]) -> tuple[bool, str | None]:
@@ -894,11 +975,19 @@ def _axis_e(measurements: list[dict[str, Any]], plan: dict[str, Any]) -> dict[st
                 failures.append(reason or "identity mismatch"); continue
             rel = _relative_error(candidate["z"], reference["z"])
             family = candidate["family"]
-            passed = float(np.max(rel)) <= (1e-8 if family == "package" else 1e-6)
+            maximum = float(np.max(rel))
+            if family in {"package", "unknown"}:
+                passed = maximum <= 1e-8
+            elif family == "pcb":
+                passed = maximum <= 1e-6
+            else:
+                passed = False
             if family == "pcb":
                 mask = candidate["freq"] >= 1e6
                 passed = passed and bool(np.any(mask)) and float(np.max(rel[mask])) <= 1e-7
-            if not passed: failures.append(f"{design}/{port} jobs={candidate['jobs']}: E3 GPU tolerance failed")
+            if not passed:
+                label = "strict unclassified" if family == "unknown" else str(family or "missing-family")
+                failures.append(f"{design}/{port} jobs={candidate['jobs']}: E3 GPU {label} tolerance failed")
     if not gpu_rows:
         missing.append("GPU concurrency receipts are missing")
     status = "FAIL" if failures else ("INCOMPLETE" if missing or not checks else "PASS")
@@ -912,6 +1001,13 @@ def _axis_outcomes(measurements: list[dict[str, Any]], comparisons: list[dict[st
     outcomes: dict[str, dict[str, Any]] = {}
     for axis in "ABCDEF":
         evidence = [row for row in measurements if row.get("axis") == axis]
+        planned = plan.get("axes", {}).get(axis, {}) if isinstance(plan, dict) else {}
+        if (axis == "E" and not evidence and isinstance(planned, dict)
+                and str(planned.get("status", "")).casefold() == "not_run"):
+            reason = _text(planned.get("reason")) or "planned as not run"
+            outcomes[axis] = {"status": "NOT_RUN", "cases": 0,
+                              "source": f"planned NOT_RUN: {reason}"}
+            continue
         explicit = [row.get("explicit_outcome") for row in evidence]
         explicit_bool = [value for value in explicit if isinstance(value, bool)]
         automatic = ({"B": _axis_b, "D": _axis_d, "E": _axis_e}.get(axis))
@@ -1064,18 +1160,46 @@ _PREDICTIONS = {
 
 
 def _write_korean_report(path: Path, summary: dict[str, Any]) -> None:
+    standalone = summary.get("study_mode") == "standalone_folder"
     lines = [
-        "# W15 워크스테이션 검증 보고서",
+        ("# 독립 실행 엔진 및 입력 검증 보고서" if standalone
+         else "# W15 워크스테이션 검증 보고서"),
         "",
         f"생성 시각: {summary['created_at']}",
         "",
         "이 보고서는 저장된 영수증만 집계한다. 측정값이나 비교 입력이 없으면 PASS로 채우지 않았다.",
         "",
+    ]
+    if standalone:
+        lines.extend([
+            "검증 범위는 설치 런타임, 입력 파일 구조, 합성 CPU/GPU 수치 점검이다. 과거 비공개 데이터 재현은 실행하지 않았다.",
+            "모델 정확도는 baseline 영수증과 보고서 비교에서 별도로 판정한다.",
+            "자동 발견 입력의 설계 family가 unknown이면 분류를 추측하지 않고 CPU 1e-9, GPU 1e-8의 보수적 비교 한계를 적용한다.",
+            "",
+        ])
+    else:
+        lines.extend([
+            "검증 범위는 사전등록된 W15 과거 재현 게이트와 워크스테이션 측정 캠페인이다.",
+            "",
+        ])
+    lines.extend([
         "## 환경과 게이트",
         "",
         f"- 환경 상태: {summary['environment']['status']}",
         f"- 엔진 게이트: {summary['gates']['status']}",
-    ]
+        f"- 게이트 종류: {summary['gates']['gate_kind']}",
+        f"- 과거 재현 상태: {summary['gates']['historical_reproduction']}",
+    ])
+    if standalone:
+        selection = summary["campaign_selection"]
+        excluded = summary["excluded_history_counts"]
+        lines.extend([
+            f"- 현재 게이트 fingerprint: {selection.get('gate_fingerprint') or '없음'}",
+            f"- 현재 캠페인 선택: 영수증 {selection['selected']['receipts']}개, "
+            f"비교 {selection['selected']['comparisons']}개, 그룹 실행 {selection['selected']['group_runs']}개",
+            f"- 제외된 이전 이력: 영수증 {excluded['receipts']}개, "
+            f"비교 {excluded['comparisons']}개, 그룹 실행 {excluded['group_runs']}개",
+        ])
     if summary["environment"].get("python"):
         lines.append(f"- Python: {summary['environment']['python']}")
     if summary["environment"].get("gpu"):
@@ -1155,6 +1279,9 @@ def make_report(root: Path) -> dict[str, Any]:
         except ReceiptError as exc:
             metadata_errors.append({"path": str(path), "error": str(exc)})
             return {}
+    config_path = root / "config.json"
+    config_raw = optional_json(config_path)
+    configured_folder = config_raw.get("configuration_mode") == "folder"
     env_raw = optional_json(root / "env.json")
     gates_raw = optional_json(root / "gates.json")
     env_probe = env_raw.get("probe", {}) if isinstance(env_raw, dict) else {}
@@ -1171,12 +1298,72 @@ def make_report(root: Path) -> dict[str, Any]:
         "version_checks": env_raw.get("version_checks", {}) if isinstance(env_raw, dict) else {},
     }
     gate_suites = gates_raw.get("suites", []) if isinstance(gates_raw, dict) else []
+    standalone_raw = gates_raw.get("standalone", {}) if isinstance(gates_raw, dict) else {}
+    gate_kind = gates_raw.get("gate_kind") if isinstance(gates_raw, dict) else None
+    standalone_gate = gate_kind == "standalone_runtime_and_inputs"
+    folder_mode = configured_folder or standalone_gate
+    if standalone_gate:
+        gate_pass = (
+            gates_raw.get("ok") is True
+            and isinstance(standalone_raw, dict)
+            and standalone_raw.get("ok") is True
+            and standalone_raw.get("gate_kind") == "standalone_runtime_and_inputs"
+            and gates_raw.get("historical_reproduction") == "not_run"
+            and standalone_raw.get("historical_reproduction") == "not_run"
+        )
+        historical_reproduction = "not_run"
+        accuracy_verification = standalone_raw.get("accuracy_verification")
+    else:
+        gate_pass = gates_raw.get("ok") is True and len(gate_suites) == 3
+        gate_kind = gate_kind or "preregistered_historical_reproduction"
+        historical_reproduction = (gates_raw.get("historical_reproduction")
+                                   or ("passed" if gate_pass else "not_established"))
+        accuracy_verification = gates_raw.get("accuracy_verification")
+    if configured_folder and not standalone_gate:
+        gate_pass = False
     gates = {
-        "status": "PASS" if isinstance(gates_raw, dict) and gates_raw.get("ok") is True and len(gate_suites) == 3
-                  else ("FAIL" if gates_raw else "NOT_RUN"),
+        "status": "PASS" if gate_pass else ("FAIL" if gates_raw else "NOT_RUN"),
+        "gate_kind": gate_kind or "not_run",
+        "historical_reproduction": historical_reproduction,
+        "accuracy_verification": accuracy_verification,
         "engine_fingerprint": gates_raw.get("engine_fingerprint") if isinstance(gates_raw, dict) else None,
         "suites": [{key: row.get(key) for key in ("name", "ok", "tests", "passed", "skipped", "wall_seconds")}
                    for row in gate_suites if isinstance(row, dict)],
+    }
+    current_fingerprint = gates.get("engine_fingerprint")
+    excluded_history_counts = {"receipts": 0, "comparisons": 0, "group_runs": 0,
+                               "receipt_errors": 0, "comparison_errors": 0,
+                               "group_run_errors": 0}
+    campaign_identity_errors: list[str] = []
+    if folder_mode:
+        selection_fingerprint = current_fingerprint
+        if config_path.is_file():
+            engine_evidence = gates_raw.get("engine_evidence")
+            recorded_config_hash = (engine_evidence.get("config_sha256")
+                                    if isinstance(engine_evidence, dict) else None)
+            actual_config_hash = _sha256(config_path)
+            if recorded_config_hash != actual_config_hash:
+                campaign_identity_errors.append(
+                    "current config SHA-256 differs from gates.engine_evidence.config_sha256")
+                selection_fingerprint = None
+        (measurements, comparisons, group_runs, excluded,
+         selection_errors) = _select_folder_campaign(
+            measurements, comparisons, group_runs, selection_fingerprint)
+        campaign_identity_errors.extend(selection_errors)
+        excluded_history_counts.update(excluded)
+        excluded_history_counts.update(
+            receipt_errors=len(receipt_errors), comparison_errors=len(comparison_errors),
+            group_run_errors=len(group_run_errors))
+        # Evidence without readable current-campaign proof is retained on disk as history. It must
+        # neither support an outcome nor turn a new folder campaign into a false failure.
+        receipt_errors = []
+        comparison_errors = []
+        group_run_errors = []
+    campaign_selection = {
+        "basis": "exact_gate_fingerprint_and_input_identity" if folder_mode else "all_manual_evidence",
+        "gate_fingerprint": current_fingerprint,
+        "selected": {"receipts": len(measurements), "comparisons": len(comparisons),
+                     "group_runs": len(group_runs)},
     }
     plan = optional_json(root / "matrix_plan.json")
     outcomes = _axis_outcomes(measurements, comparisons, plan)
@@ -1188,9 +1375,7 @@ def make_report(root: Path) -> dict[str, Any]:
             "cases": len(convergence_cases),
             "source": "per-case mesh RMS/max dB and cost evidence",
         }
-    current_fingerprint = gates.get("engine_fingerprint")
-    campaign_identity_errors = []
-    if current_fingerprint:
+    if current_fingerprint and not folder_mode:
         for row in measurements:
             fingerprint = row.get("gate_fingerprint")
             if fingerprint and fingerprint != current_fingerprint:
@@ -1242,9 +1427,12 @@ def make_report(root: Path) -> dict[str, Any]:
         "kind": "w15_workstation_summary",
         "created_at": _utc_now(),
         "root": str(root.resolve()),
+        "study_mode": "standalone_folder" if folder_mode else "preregistered_legacy",
         "overall_status": overall,
         "environment": environment,
         "gates": gates,
+        "campaign_selection": campaign_selection,
+        "excluded_history_counts": excluded_history_counts,
         "receipt_count": len(measurements),
         "comparison_count": len(comparisons),
         "group_run_count": len(group_runs),

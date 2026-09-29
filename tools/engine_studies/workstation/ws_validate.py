@@ -34,10 +34,10 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 from common import (RunLock, Settings, atomic_json, input_identity, load_settings, read_json,
                     receipt_path, resumable_receipt, safe_name, sha256_file, unique_path, utc_now,
-                    compare_receipt_vectors)
+                    compare_receipt_vectors, bundled_runtime, engine_paths)
 
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 HARD_VERSIONS = {"python": "3.12.10", "numpy": "2.4.4", "scipy": "1.18.0"}
 REFERENCE_VERSIONS = {
     **HARD_VERSIONS, "matplotlib": "3.10.9",
@@ -239,6 +239,11 @@ def _call_worker(settings: Settings, request: dict, run_dir: Path, label: str, l
         raise KeyboardInterrupt("immediate stop requested")
     if code != 0 or not result.get("ok"):
         raise RuntimeError(result.get("error") or f"engine worker exited {code}")
+    if request.get("operation") == "compare" and settings.configuration_mode == "folder":
+        fingerprint = read_json(settings.root / "gates.json", {}).get("engine_fingerprint")
+        result["result"]["gate_fingerprint"] = fingerprint
+        if request.get("out"):
+            atomic_json(Path(request["out"]), result["result"])
     return result["result"]
 
 
@@ -250,6 +255,9 @@ def _new_run(root: Path, command: str):
 
 
 def _git_head(root: Path) -> dict:
+    manifest = root / "runtime-manifest.json"
+    if manifest.is_file():
+        return {"bundled": True, "runtime_manifest_sha256": sha256_file(manifest)}
     try:
         proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True,
                               text=True, timeout=20)
@@ -272,6 +280,10 @@ def _engine_fingerprint(settings: Settings, probe: dict) -> tuple[str, dict]:
                 "engine_module": probe.get("engine", {}).get("module"),
                 "python": probe.get("python"), "packages": probe.get("packages"),
                 "gpu_driver": driver, "detected_hardware": hardware}
+    if settings.configuration_mode == "folder":
+        evidence["inputs"] = {key: {"spd": sha256_file(spec.spd),
+                                    "reference": sha256_file(spec.reference)}
+                              for key, spec in settings.designs.items()}
     return input_identity(evidence, {})[0], evidence
 
 
@@ -287,6 +299,41 @@ def _version_evidence(probe: dict) -> tuple[dict, dict, list[str]]:
                 f"{item['actual']!r} (reference {item['reference']!r})"
                 for name, item in differences.items() if name in GPU_VERSION_NAMES]
     return hard_checks, differences, warnings
+
+
+def command_prepare(args, status: Status, run_dir: Path, log) -> int:
+    """Prepare read-only user inputs with the installed runtime; publish only on success."""
+    data_dir = args.data_dir.expanduser().resolve()
+    if not data_dir.is_dir():
+        raise ValueError(f"SPD / Touchstone folder does not exist: {data_dir}")
+    raw = read_json(args.root / "config.json", {})
+    bundle = bundled_runtime()
+    python, engine = engine_paths(args.root, raw)
+    settings = Settings(root=args.root, engine_python=python, engine_root=engine, data_dir=data_dir)
+    status.update(force=True, current_case="SPD / Touchstone 파일 검색 및 변환")
+    try:
+        prepared = _call_worker(settings, {"operation": "prepare", "data_dir": str(data_dir),
+                                           "root": str(args.root)}, run_dir, "prepare", log, status,
+                                args.stop_file, args.stop_now)
+        if _stop_mode(args.stop_file, args.stop_now):
+            return 130
+        config = {**raw, "data_dir": str(data_dir), "configuration_mode": "folder",
+                  "designs": prepared["designs"], "port_sets": prepared["port_sets"]}
+        if bundle == (python, engine):
+            config.update(engine_mode="bundled", engine_python=None, engine_root=None)
+        if config != raw:
+            if raw:
+                atomic_json(run_dir / "config.before.json", raw)
+            atomic_json(args.root / "config.json", config)
+        record = {**prepared, "ok": True, "data_dir": str(data_dir), "created_at": utc_now(),
+                  "configuration_mode": "folder", "historical_reproduction": "not_run"}
+        atomic_json(args.root / "preparation.json", record)
+        print(json.dumps(record, ensure_ascii=False, indent=2))
+        return 0
+    except Exception as exc:
+        atomic_json(args.root / "preparation.json", {"ok": False, "data_dir": str(data_dir),
+                                                     "error": str(exc), "created_at": utc_now()})
+        raise
 
 
 def command_env(args, status: Status, run_dir: Path, log) -> int:
@@ -406,6 +453,20 @@ def command_gates(args, status: Status, run_dir: Path, log) -> int:
     fingerprint, engine_evidence = _engine_fingerprint(settings, probe)
     result.update(engine_fingerprint=fingerprint, engine_evidence=engine_evidence,
                   reference_checks=reference_checks)
+    if settings.configuration_mode == "folder":
+        result.update(gate_kind="standalone_runtime_and_inputs", historical_reproduction="not_run")
+        atomic_json(args.root / "gates.json", result)
+        selected = _ports_for(settings, "P92", None, run_dir, log, status, args)
+        designs = [{"design_id": key, "spd": str(spec.spd), "reference": str(spec.reference),
+                    "ports": [port for design, port in selected if design == key]}
+                   for key, spec in settings.designs.items()]
+        check = _call_worker(settings, {"operation": "standalone_gate", "designs": designs,
+                                       "gpu": bool(probe.get("profiles", {}).get("detected", {}).get("gpus"))},
+                             run_dir, "standalone-gate", log, status, args.stop_file, args.stop_now)
+        result.update(ok=check.get("ok") is True, standalone=check,
+                      suites=[{"name": "standalone_runtime_and_inputs", "ok": check.get("ok") is True}])
+        atomic_json(args.root / "gates.json", result)
+        return 130 if _stop_mode(args.stop_file, args.stop_now) else (0 if result["ok"] else 1)
     suites = [("default", []), ("gpu", ["--gpu"]), ("slow", ["--slow"])]
     env = os.environ.copy()
     env.update(SPD_PI_DATA_DIR=str(settings.data_dir), SPD_PI_WORK_DIR=str(settings.root))
@@ -444,8 +505,13 @@ def command_gates(args, status: Status, run_dir: Path, log) -> int:
 def _measurement_unlocked(settings: Settings, probe: dict) -> None:
     root = settings.root
     gates = read_json(root / "gates.json", {})
-    if not gates.get("ok") or len(gates.get("suites", [])) != 3:
-        raise RuntimeError(f"measurements are locked: three genuine engine gates have not passed in {root/'gates.json'}")
+    if settings.configuration_mode == "folder":
+        passed = (gates.get("ok") is True and gates.get("gate_kind") == "standalone_runtime_and_inputs"
+                  and gates.get("standalone", {}).get("ok") is True)
+    else:
+        passed = gates.get("ok") and len(gates.get("suites", [])) == 3
+    if not passed:
+        raise RuntimeError(f"measurements are locked: required engine/input gates have not passed in {root/'gates.json'}")
     current, _ = _engine_fingerprint(settings, probe)
     if gates.get("engine_fingerprint") != current:
         raise RuntimeError("measurements are locked: config, engine source, Python, or package versions changed after gates")
@@ -692,6 +758,7 @@ def _run_cases(settings: Settings, cases: list[dict], jobs: int, status: Status,
         group_id = input_identity({"group": group_key,
                                    "cases": sorted(c["identity"] for c in cases)}, {})[0]
         record = {"schema_version": 1, "group_id": group_id, **group_key,
+                  "gate_fingerprint": read_json(settings.root / "gates.json", {}).get("engine_fingerprint"),
                   "started_at": group_started_at, "finished_at": utc_now(),
                   "total_wall_seconds": time.perf_counter() - group_started,
                   "wall_scope": "this immutable execution attempt; aggregate attempts by group_id",
@@ -773,9 +840,13 @@ def _comparison_failure(run_dir: Path, name: str, detail: dict) -> str:
 
 def command_baseline(args, status: Status, run_dir: Path, log) -> int:
     settings = load_settings(args.root)
-    _measurement_prepare(settings, args, status, run_dir, log)
+    probe = _measurement_prepare(settings, args, status, run_dir, log)
     selected = _ports_for(settings, args.ports, args.design, run_dir, log, status, args)
     backends = [args.backend] if args.backend else ["splu", "auto"]
+    gpu_skipped = (settings.configuration_mode == "folder" and not args.backend and
+                   not probe.get("profiles", {}).get("detected", {}).get("gpus"))
+    if gpu_skipped:
+        backends = ["splu"]
     cases = []
     for backend in backends:
         repeats = 2 if backend in ("auto", "cudss") else 1
@@ -843,6 +914,8 @@ def command_baseline(args, status: Status, run_dir: Path, log) -> int:
                                  "comparison_failures": comparison_failures,
                                  "comparisons": comparisons,
                                  "worker_failure_count": failures, "solver_proof": solver_ok,
+                                 "gpu_validation": "not_run_no_gpu" if gpu_skipped else "requested",
+                                 "reference_accuracy": "see individual receipt ladder_gates",
                                  "stopped": stopped})
     return code
 
@@ -876,11 +949,15 @@ def _publish_matrix_plan(root: Path, run_dir: Path, update: dict) -> dict:
 
 def command_matrix(args, status: Status, run_dir: Path, log) -> int:
     settings = load_settings(args.root)
-    _measurement_prepare(settings, args, status, run_dir, log)
+    probe = _measurement_prepare(settings, args, status, run_dir, log)
     selected = _ports_for(settings, args.ports, args.design, run_dir, log, status, args)
     axes = list("BCDE") if args.axis == "all" else [args.axis]
     all_cases = []
     planning = {"schema_version": 1, "created_at": utc_now(), "axes": {}}
+    if ("E" in axes and settings.configuration_mode == "folder" and
+            not probe.get("profiles", {}).get("detected", {}).get("gpus")):
+        axes.remove("E")
+        planning["axes"]["E"] = {"status": "not_run", "reason": "No NVIDIA GPU detected"}
     if "B" in axes:
         combos = [(t, j) for t in (1, 2, 4, 8, 16) for j in (1, 4, 8, 15, 30) if t*j <= 64]
         planning["axes"]["B"] = {"combinations": combos, "constraint": "jobs*threads <= 64",
@@ -1242,6 +1319,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--self-check", action="store_true")
     parser.add_argument("--version", action="version", version=VERSION)
     sub = parser.add_subparsers(dest="command")
+    prepare = sub.add_parser("prepare"); _common(prepare, defaults=False)
+    prepare.add_argument("--data-dir", type=Path, required=True)
     for name in ("env", "gates", "report"):
         child = sub.add_parser(name); _common(child, defaults=False)
     batch = sub.add_parser("batch"); _common(batch, defaults=False)
@@ -1265,7 +1344,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-COMMANDS = {"env": command_env, "gates": command_gates, "baseline": command_baseline,
+COMMANDS = {"prepare": command_prepare, "env": command_env, "gates": command_gates, "baseline": command_baseline,
             "matrix": command_matrix, "converge": command_converge,
             "compare": command_compare, "report": command_report, "batch": command_batch}
 

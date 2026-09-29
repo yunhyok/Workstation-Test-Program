@@ -12,9 +12,25 @@
     }
   },
   "port_sets": {
-    "P9": {"design_a": ["PortA"]},
-    "P20": {"design_a": ["PortA", "PortB"]},
-    "P92": {"design_a": "all"},
-    "E4": {"design_a": ["PortB"]}
-  }
+    "P9": {
+      "design_a": [
+        "PortA"
+      ]
+    },
+    "P20": {
+      "design_a": [
+        "PortA",
+        "PortB"
+      ]
+    },
+    "P92": {
+      "design_a": "all"
+    },
+    "E4": {
+      "design_a": [
+        "PortB"
+      ]
+    }
+  },
+  "configuration_mode": "manual"
 }

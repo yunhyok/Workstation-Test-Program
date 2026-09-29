@@ -1,56 +1,39 @@
 # Workstation Test Program
 
-SPD PI 계산 엔진의 기계 간 수치 재현성과 CPU/GPU 자원 계획을 검증하는 Windows 프로그램.
-GUI, 검증 CLI, Bearer 인증 LAN 에이전트, 노트북 제어 CLI를 제공합니다.
+SPD PI 계산의 수치 재현성과 CPU/GPU 자원 계획을 검증하는 Windows 프로그램입니다.
 
-1.1.0 변경: 전체 실험·단계별 모든 조건 순차 실행 버튼, 단계 목록과 중단·재개를 추가했습니다. 현재 PR의 설치 후보이며 병합은 소유자가 진행합니다.
-1.0.1 변경: baseline 종료 상태, 로컬 설계 설정, 에이전트 연결 제한, 버전 잠금과 운용 지적을 수정했습니다.
+1.2.0 설치 후보: Python·계산 엔진·CPU/GPU 라이브러리를 포함하고, SPD·Touchstone 폴더를 선택하면 파일 연결과 참조 변환, 실험 목록을 자동으로 준비합니다. PR 병합은 소유자가 진행합니다.
 
 ## 설치하고 시작하기
 
-1. [Releases](https://github.com/yunhyok/Workstation-Test-Program/releases)에서
-   해당 버전의 `Workstation-Test-Program-<version>-Setup-x64.exe`를 내려받아 실행합니다.
-2. 작업 폴더에 `config.example.json`을 `config.json`으로 복사하고 소유자가 제공하는 설계·포트 목록을 입력합니다. 시작 메뉴의 **Workstation Test Program**에서 **엔진 연결 설정**을 입력합니다.
-3. **전체 실험 순차 실행 / 재개**를 누릅니다. 단계별로 실행하려면 실행 단계를 선택하고 **선택 단계의 모든 조건 실행 / 재개**를 누릅니다.
+1. `Workstation-Test-Program-1.2.0-Setup-x64.exe`를 실행하고 시작 메뉴에서 프로그램을 엽니다.
+2. **데이터 폴더**에서 SPD와 Touchstone 파일이 들어 있는 폴더를 선택합니다. 하위 폴더도 검색합니다.
+3. **전체 실험 순차 실행 / 재개**를 누릅니다. 파일 준비 후 실험이 이어집니다. **폴더 적용 / 파일 준비**로 먼저 파일 연결 결과만 확인할 수도 있습니다.
 
-인스톨러는 현재 사용자에게 설치되며 관리자 권한이 필요하지 않습니다.
-앱 실행용 Python/Tk는 포함됩니다. **수치 계산용 Python 3.12.10, 외부 계산 엔진과 GPU
-라이브러리, 설계 데이터는 별도로 준비**합니다. 설치/제거는 작업 영수증을 지우지 않습니다.
-코드 서명 인증서는 포함되지 않으므로 배포 파일은 서명되지 않은 빌드입니다.
+Python 설치, pip 명령, 엔진 저장소, JSON 편집, 인터넷 연결은 설치 후 실행에 필요하지 않습니다.
+인스톨러는 현재 사용자에게 설치되며 관리자 권한을 요구하지 않습니다. GPU 테스트에는 지원되는 NVIDIA GPU와 드라이버가 필요합니다. GPU가 감지되지 않으면 CPU 기준선은 실행하고 GPU 항목은 미실행으로 기록합니다. GPU가 있지만 계산에 실패하면 통과로 바꾸지 않습니다.
 
-## 엔진 환경 준비
+원본 SPD·Touchstone 파일은 수정하지 않습니다. 생성한 참조 NPZ, 설정, 계산 결과는 기본적으로
+`%LOCALAPPDATA%/WorkstationTestProgram/w15`에 저장합니다. 기존 작업 폴더를 바꿀 수도 있습니다.
+최초 파일 준비 시간은 데이터 크기에 따라 달라지며 이후에는 해시로 확인한 변환 결과를 재사용합니다.
+설치/제거는 작업 데이터를 지우지 않습니다. 설치 파일은 코드 서명되지 않은 빌드입니다.
 
-외부 엔진은 **소유자가 제공하는 엔진 체크아웃**을 사용합니다. 이 저장소는 엔진 소스를
-복제하거나 수치 모듈을 변경하지 않습니다. 해당 체크아웃에서 실행합니다.
+## 자동 파일 연결과 검증 범위
 
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev,gpu]"
-# 소유자가 제공한 노트북의 전체 freeze 파일과 버전을 맞춥니다.
-.\.venv\Scripts\python.exe -m pip install -r D:\Laptop-Receipts\laptop_pip_freeze_system_python.txt
-```
+Touchstone의 `! Port[n]` 헤더와 SPD의 실제 포트·전원망을 대조합니다. 같은 이름 계열의 파일을 우선 연결하며 여러 후보가 남으면 오류로 표시합니다. 추측한 포트 연결로 계산하지 않습니다.
+지원 입력은 PowerSI 형식의 `.spd`, `.sNp`, 그리고 같은 v1 형식에 완전한 포트 헤더를 가진 `.ts`입니다. 지원하지 않는 형식이나 중복 포트 매핑은 파일 준비 화면에 이유를 표시합니다.
 
-측정의 필수 버전은 Python **3.12.10**, numpy **2.4.4**, scipy **1.18.0**입니다.
-노트북 비교 기준: matplotlib 3.10.9, nvmath-python 1.0.0, nvidia-cudss-cu12 0.8.0.10,
-cuda-bindings 12.9.8, cupy-cuda12x 14.2.0, shapely 2.1.2, pydantic 2.13.3.
-freeze 파일 안의 로컬 editable 경로는 대상 워크스테이션의 엔진 경로로 설치합니다.
-나머지 버전 차이는 env.json과 gates.json에 기록하며 GPU 스택 차이는 경고합니다.
-세 필수 버전을 제외한 차이만으로 최초 측정을 막지 않습니다. 게이트 통과 이후 패키지·엔진이
-변경되면 기존 게이트는 무효가 되므로 다시 실행해야 합니다. GPU 드라이버는 탐지값을 사용합니다.
+P9/P20은 발견한 포트 중 최대 9/20개, P92는 **모든 설계의 전체 포트**, E4는 기저 비교용 한 포트입니다. P92라는 이름이 실제 92개를 뜻하지는 않습니다. 자동 생성한 목록은 기존 W15 사전 등록 설계·포트 목록과 구분합니다. 입력에 package/PCB 분류가 선언되지 않으면 임의로 추측하지 않고 엄격한 비교 허용치를 사용합니다.
 
-작업 폴더의 `config.json`에 [config.example.json](config.example.json)을 복사하거나 GUI에서
-같은 값을 입력합니다. GUI 기본 작업 폴더는 `%LOCALAPPDATA%\WorkstationTestProgram\w15`이며
-`SPD_PI_WORK_DIR` 환경변수가 있으면 그 아래 `w15`를 사용합니다.
-`engine_python`은 외부 Python 실행 파일, `engine_root`는 `tests/engine`이 있는 저장소입니다.
-SPD는 data_dir에, 참조 NPZ는 data_dir 또는 그 아래 analysis에 둡니다.
-JSON 경로는 `D:/WS-Work/w15`처럼 `/`를 권장합니다. 역슬래시를 쓰려면
-`"D:\\WS-Work\\w15"`처럼 `\\`로 이스케이프합니다.
+설치 모드의 gates는 내장 엔진의 합성 CPU/GPU 풀이와 입력 파일의 포트·참조 정합성을 확인합니다. 과거 사전 등록 재현 테스트를 실행했다는 뜻은 아닙니다. 실제 설계와 참조의 정확도는 baseline 영수증과 보고서의 수치로 판단합니다. 노트북 영수증을 지정하지 않아도 실행되며, 기계 간 비교는 미설정으로 표시합니다.
 
-실제 설계 파일명과 포트명은 소유자의 **로컬 config.json에만** 입력합니다. 예시의
-`design_a`, `PortA`는 형식을 보여주는 값으로 실제 데이터를 의미하지 않습니다.
-기존 1.0.0 설정도 아래 `designs`와 `port_sets`를 추가해야 측정을 시작할 수 있습니다.
-선택 항목 `laptop_receipts`와 `laptop_freeze`의 기본값은 `null`입니다. 비교할 노트북
-자료가 있을 때만 실제 경로로 설정합니다. 지정한 영수증 폴더가 없으면 비교 실패로 기록합니다.
+CPU/GPU 라이브러리는 고정 버전으로 포함됩니다: Python 3.12.10, NumPy 2.4.4, SciPy 1.18.0.
+전체 버전과 엔진 해시는 `engine-runtime/runtime-manifest.json`에 있습니다.
+
+## 고급 설정과 기존 수동 실험
+
+고급 설정은 선택 사항입니다. 노트북 영수증/freeze를 비교하거나 외부 엔진으로 기존 사전 등록 실험을 재현할 때만 사용합니다. `config.example.json`은 이 수동 모드의 예시이며 일반 설치 사용자는 복사할 필요가 없습니다.
+수동 설정은 `configuration_mode: "manual"`로 지정하고 설계·포트·외부 Python과 엔진 경로를 넣습니다. 수동 모드의 gates는 기존 기본/GPU/slow 재현 테스트를 그대로 요구합니다. 엔진·환경·설정이 바뀌면 gates를 다시 실행해야 합니다.
 
 ## CLI
 
@@ -66,7 +49,7 @@ GUI의 **전체 실험 순차 실행 / 재개**는 아래 10단계를 순서대�
 
 | 순서 | 단계 | 자동으로 적용하는 조건 |
 | --- | --- | --- |
-| 1–2 | env → gates | 환경 확인 → 기본/GPU/slow 필수 게이트 |
+| 1–2 | env → gates | 환경 확인 → 설치 모드 입력·런타임 게이트 (수동 모드는 기존 재현 게이트) |
 | 3–4 | baseline | P9 → P92, 각각 CPU 및 GPU 2회 비교 |
 | 5 | matrix B | P9, threads 1/2/4/8/16 × jobs 1/4/8/15/30, 곱 ≤64 |
 | 6 | matrix C | P92, 논리 CPU affinity 8/16/32/64; 호스트 초과 마스크는 미실행 기록 |
@@ -74,10 +57,10 @@ GUI의 **전체 실험 순차 실행 / 재개**는 아래 10단계를 순서대�
 | 8 | matrix E | P20 GPU jobs 1/2/4/8, VRAM 플래너 8/24/48 GB, E4 기저 비교 |
 | 9–10 | converge → report | P92 fine 수렴성 → 보고서 생성 |
 
-자동 실행은 소유자가 config.json에 등록한 포트 집합과 위 실험 조건을 사용합니다.
+자동 실행은 폴더에서 생성한 포트 집합 또는 수동으로 등록한 포트 집합과 위 조건을 사용합니다.
 화면의 포트·축 선택은 **선택 조건 수동 실행 / 재개**에만 적용됩니다.
 전체 실행에는 비용이 큰 선택 실험 F도 포함되어 수 시간 이상 걸릴 수 있습니다.
-설정에 없는 임의 설계나 새로운 수치 조합을 자동으로 추가하지 않습니다.
+폴더를 새로 준비하면 발견한 설계와 포트 목록이 갱신됩니다. 수치 계산 옵션은 유지합니다.
 
 어느 단계든 실패하거나 중단하면 뒤 단계는 실행하지 않습니다. 단계만 실행할 때도
 측정 단계의 기존 게이트 검사를 통과해야 합니다. 다시 누르면 입력 신원이 일치하는
@@ -99,6 +82,7 @@ GUI의 **전체 실험 순차 실행 / 재개**는 아래 10단계를 순서대�
 ### 수동 CLI 실행
 
 ```powershell
+.\WorkstationTest.exe validate prepare --data-dir D:\Design-Data --root D:\WS-Work\w15
 .\WorkstationTest.exe validate env --root D:\WS-Work\w15
 .\WorkstationTest.exe validate gates --root D:\WS-Work\w15
 .\WorkstationTest.exe validate baseline --ports P9 --root D:\WS-Work\w15
@@ -110,7 +94,7 @@ GUI의 **전체 실험 순차 실행 / 재개**는 아래 10단계를 순서대�
 .\WorkstationTest.exe validate --self-check
 ```
 
-전체 측정 전에 `gates`가 기본/--gpu/--slow 세 엔진 테스트를 실행합니다. 게이트는 CPU
+기존 수동 모드에서는 전체 측정 전에 `gates`가 기본/--gpu/--slow 세 엔진 테스트를 실행합니다. 게이트는 CPU
 대형 계산을 포함해 수십 분~수 시간이 걸릴 수 있습니다. 데이터가 없어서 필수 테스트가
 skip된 경우에는 측정을 허용하지 않습니다. 일반 자기검사는 설계 데이터가 필요 없습니다.
 
@@ -248,14 +232,14 @@ python -m pytest tests -q
 python app.py gui --smoke
 python app.py agent --self-check
 python -m pip install -r requirements-build.txt
-./scripts/build_windows.ps1
+./scripts/build_windows.ps1 -EngineRoot C:/Projects/Owner-Engine
 ./scripts/smoke_install.ps1
 ```
 
 빌드 도구: [PyInstaller spec](https://pyinstaller.org/en/stable/spec-files.html),
 [Inno Setup](https://jrsoftware.org/ishelp/topic_setup_architecturesallowed.htm) 6.3 이상(검증 빌드 7).
-출력은 `dist/installer/Workstation-Test-Program-1.1.0-Setup-x64.exe`입니다.
-CPU/GPU 수치 라이브러리는 설치 파일에 중복 포함하지 않고 외부의 고정 환경에서 실행합니다.
+출력은 `dist/installer/Workstation-Test-Program-1.2.0-Setup-x64.exe`입니다.
+빌드는 소유자가 제공하는 엔진 체크아웃과 고정 버전 라이브러리가 설치된 Python 3.12.10 환경에서 수행합니다. `scripts/bundle_runtime.py`가 지정된 배포 패키지와 의존성만 복사하고 사용자 site-packages/PYTHONPATH와 격리합니다. 엔진 소스·원본 데이터·빌드 런타임은 Git에 올리지 않습니다. 설치 파일에는 엔진과 필요한 라이브러리·라이선스를 포함합니다.
 
 사전 등록: [W15_PLAN_20260921.md](docs/engine/W15_PLAN_20260921.md).
 구현/검사 증거: [W15_REPORT.md](https://github.com/yunhyok/Workstation-Test-Program/blob/main/docs/engine/W15_REPORT.md).

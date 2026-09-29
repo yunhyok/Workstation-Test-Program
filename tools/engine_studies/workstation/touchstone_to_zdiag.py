@@ -84,7 +84,7 @@ def _read_port_names(path: Path, rails: Sequence[str]) -> list[str]:
 
 
 def _against_raw_names(path: Path) -> list[str]:
-    with np.load(path, allow_pickle=True) as expected:
+    with np.load(path, allow_pickle=False) as expected:
         if "port_names" not in expected:
             raise ValueError("against NPZ has no port_names")
         return [str(item) for item in expected["port_names"]]
@@ -103,7 +103,7 @@ def _against_names(path: Path, rails: Sequence[str], names: Sequence[str] | None
 
 
 def _validate_against(freq: np.ndarray, names: Sequence[str], zdiag: np.ndarray, path: Path) -> None:
-    with np.load(path, allow_pickle=True) as expected:
+    with np.load(path, allow_pickle=False) as expected:
         required = {"freq", "port_names", "Zdiag"}
         if not required.issubset(expected.files):
             raise ValueError(f"against NPZ is missing {sorted(required.difference(expected.files))}")

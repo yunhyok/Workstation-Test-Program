@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import sys
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 BASE = Path(__file__).resolve().parent
 SCRIPTS = BASE / "tools" / "engine_studies" / "workstation"
 sys.path.insert(0, str(SCRIPTS))
@@ -29,7 +29,7 @@ def main() -> int:
     elif command in ("--help", "-h"):
         print("Workstation Test Program " + VERSION)
         print("Usage: WorkstationTest.exe {gui|validate|agent|ctl} [options]")
-        print("Numerical work uses the separately configured Python 3.12.10 engine.")
+        print("Standalone installer includes the engine. Select the SPD / Touchstone folder in the GUI.")
         return 0
     else:
         print(f"Unknown command: {command}", file=sys.stderr)

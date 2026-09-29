@@ -111,6 +111,20 @@ class CompareDirectoriesTests(unittest.TestCase):
         self.assertTrue(result["pass"])
         self.assertEqual([check["limit"] for check in result["pairs"][0]["checks"]], [1e-6, 1e-7])
 
+    def test_unclassified_family_uses_strict_cpu_and_gpu_limits(self):
+        cpu = self.compare(receipt(family="unknown", z=[1 + 0j, 1 + 0j]),
+                           receipt(family="unknown", z=[1 + 5e-10, 1 + 5e-10]))
+        self.assertTrue(cpu["pass"])
+        self.assertEqual(cpu["pairs"][0]["checks"][0]["limit"], 1e-9)
+        self.assertIn("unclassified (strict)", cpu["pairs"][0]["checks"][0]["name"])
+        (self.left / "a.json").unlink(); (self.right / "b.json").unlink()
+        gpu = self.compare(receipt(family="unknown", z=[1 + 0j, 1 + 0j]),
+                           receipt(family="unknown", backend="cudss", threads=2,
+                                   z=[1 + 5e-9, 1 + 5e-9]))
+        self.assertTrue(gpu["pass"])
+        self.assertEqual(gpu["pairs"][0]["checks"][0]["limit"], 1e-8)
+        self.assertIn("unclassified (strict)", gpu["pairs"][0]["checks"][0]["name"])
+
     def test_e4_basis_has_distinct_gpu_tolerance(self):
         base = receipt(role="basis_cpu", z=[1 + 0j, 1 + 0j])
         gpu = receipt(backend="cudss", role="basis_gpu", z=[1 + 5e-6, 1 + 5e-6])
@@ -187,8 +201,170 @@ class CompareDirectoriesTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             compare_directories(self.left, self.right, out)
 
+    def test_comparison_records_receipt_campaign_identities(self):
+        left = receipt(); right = receipt()
+        left["study"].update(gate_fingerprint="campaign-a", input_identity="left-input")
+        right["study"].update(gate_fingerprint="campaign-a", input_identity="right-input")
+        result = self.compare(left, right)
+        self.assertEqual(result["input_identities_by_gate_fingerprint"], {
+            "campaign-a": ["left-input", "right-input"]})
+
 
 class ReportTests(unittest.TestCase):
+    def test_folder_report_selects_only_current_campaign_and_records_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); receipts = root / "receipts"; receipts.mkdir()
+            comparisons = root / "comparisons"; comparisons.mkdir()
+            groups = root / "group_runs"; groups.mkdir()
+            current = "current-folder-fingerprint"
+            write_json(root / "env.json", {"ok": True, "probe": {}})
+            write_json(root / "gates.json", {
+                "ok": True, "engine_fingerprint": current,
+                "gate_kind": "standalone_runtime_and_inputs",
+                "historical_reproduction": "not_run",
+                "standalone": {"ok": True, "gate_kind": "standalone_runtime_and_inputs",
+                               "historical_reproduction": "not_run",
+                               "accuracy_verification": "baseline_receipts_and_report"},
+                "suites": [{"name": "standalone_runtime_and_inputs", "ok": True}],
+            })
+            current_row = receipt(axis="F", case_id="current")
+            current_row["study"].update(gate_fingerprint=current, input_identity="current-input")
+            old_row = receipt(axis="B", case_id="old")
+            old_row["study"].update(gate_fingerprint="old-folder", input_identity="old-input")
+            unknown_row = receipt(axis="B", case_id="unknown")
+            unknown_row["study"].pop("gate_fingerprint", None)
+            unknown_row["study"]["input_identity"] = "unknown-input"
+            write_json(receipts / "current.json", current_row)
+            write_json(receipts / "old.json", old_row)
+            write_json(receipts / "unknown.json", unknown_row)
+            comparison = {"kind": "workstation_receipt_comparison", "pass": True,
+                          "gate_fingerprint": current, "pairs": [],
+                          "input_identities_by_gate_fingerprint": {current: ["current-input"]}}
+            write_json(comparisons / "current.json", comparison)
+            write_json(comparisons / "old.json", {"kind": "workstation_receipt_comparison",
+                                                    "pass": True, "pairs": []})
+            base_group = {"schema_version": 1, "group_id": "group", "axis": "F",
+                          "total_wall_seconds": 1.0, "case_count": 1,
+                          "executed_case_count": 1, "resumed_case_count": 0,
+                          "failed_case_count": 0, "stopped": False}
+            write_json(groups / "current.json", {**base_group, "gate_fingerprint": current,
+                                                   "case_identities": ["current-input"]})
+            write_json(groups / "old.json", {**base_group, "group_id": "old-group",
+                                               "gate_fingerprint": "old-folder",
+                                               "case_identities": ["old-input"]})
+            result = make_report(root)
+            self.assertEqual(result["receipt_count"], 1)
+            self.assertEqual(result["comparison_count"], 1)
+            self.assertEqual(result["group_run_count"], 1)
+            self.assertEqual(result["excluded_history_counts"]["receipts"], 2)
+            self.assertEqual(result["excluded_history_counts"]["comparisons"], 1)
+            self.assertEqual(result["excluded_history_counts"]["group_runs"], 1)
+            self.assertEqual(result["campaign_selection"]["gate_fingerprint"], current)
+            self.assertEqual(result["outcomes"]["B"]["status"], "NOT_RUN")
+            self.assertFalse(result["campaign_identity_errors"])
+            text = (root / "W15_REPORT.md").read_text(encoding="utf-8")
+            self.assertIn("현재 게이트 fingerprint", text)
+            self.assertIn("제외된 이전 이력", text)
+
+    def test_folder_current_campaign_with_unknown_identity_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); receipts = root / "receipts"; receipts.mkdir()
+            (root / "comparisons").mkdir()
+            current = "current-folder-fingerprint"
+            write_json(root / "env.json", {"ok": True, "probe": {}})
+            write_json(root / "gates.json", {
+                "ok": True, "engine_fingerprint": current,
+                "gate_kind": "standalone_runtime_and_inputs",
+                "historical_reproduction": "not_run",
+                "standalone": {"ok": True, "gate_kind": "standalone_runtime_and_inputs",
+                               "historical_reproduction": "not_run"},
+                "suites": [{"name": "standalone_runtime_and_inputs", "ok": True}],
+            })
+            row = receipt(axis="F")
+            row["study"].update(gate_fingerprint=current, input_identity="current-input")
+            write_json(receipts / "current.json", row)
+            write_json(root / "comparisons" / "bad.json", {
+                "kind": "workstation_receipt_comparison", "pass": True,
+                "gate_fingerprint": current, "pairs": [],
+                "input_identities_by_gate_fingerprint": {current: ["not-a-current-receipt"]},
+            })
+            result = make_report(root)
+            self.assertEqual(result["overall_status"], "FAIL")
+            self.assertTrue(any("comparison" in error for error in result["campaign_identity_errors"]))
+
+    def test_folder_config_changed_after_gates_excludes_stale_campaign_and_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); receipts = root / "receipts"; receipts.mkdir()
+            current = "stale-gate-fingerprint"
+            write_json(root / "config.json", {"configuration_mode": "folder", "data_dir": "new"})
+            write_json(root / "env.json", {"ok": True, "probe": {}})
+            write_json(root / "gates.json", {
+                "ok": True, "engine_fingerprint": current,
+                "engine_evidence": {"config_sha256": "0" * 64},
+                "gate_kind": "standalone_runtime_and_inputs",
+                "historical_reproduction": "not_run",
+                "standalone": {"ok": True, "gate_kind": "standalone_runtime_and_inputs",
+                               "historical_reproduction": "not_run"},
+                "suites": [{"name": "standalone_runtime_and_inputs", "ok": True}],
+            })
+            row = receipt(axis="B")
+            row["study"].update(gate_fingerprint=current, input_identity="stale-input")
+            write_json(receipts / "stale.json", row)
+            result = make_report(root)
+            self.assertEqual(result["overall_status"], "FAIL")
+            self.assertEqual(result["receipt_count"], 0)
+            self.assertEqual(result["excluded_history_counts"]["receipts"], 1)
+            self.assertTrue(any("config" in error for error in result["campaign_identity_errors"]))
+
+    def test_standalone_gate_is_readiness_pass_without_historical_claim(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_json(root / "env.json", {"ok": True, "probe": {}})
+            write_json(root / "gates.json", {
+                "ok": True,
+                "engine_fingerprint": "standalone-current",
+                "gate_kind": "standalone_runtime_and_inputs",
+                "historical_reproduction": "not_run",
+                "standalone": {
+                    "ok": True,
+                    "gate_kind": "standalone_runtime_and_inputs",
+                    "historical_reproduction": "not_run",
+                    "accuracy_verification": "baseline_receipts_and_report",
+                },
+                "suites": [{"name": "standalone_runtime_and_inputs", "ok": True}],
+            })
+            result = make_report(root)
+            self.assertEqual(result["gates"]["status"], "PASS")
+            self.assertEqual(result["gates"]["gate_kind"], "standalone_runtime_and_inputs")
+            self.assertEqual(result["gates"]["historical_reproduction"], "not_run")
+            self.assertEqual(result["study_mode"], "standalone_folder")
+            self.assertEqual(result["overall_status"], "INCOMPLETE")
+            report_text = (root / "W15_REPORT.md").read_text(encoding="utf-8")
+            self.assertIn("독립 실행 엔진 및 입력 검증 보고서", report_text)
+            self.assertIn("과거 비공개 데이터 재현은 실행하지 않았다", report_text)
+            self.assertIn("baseline 영수증과 보고서 비교", report_text)
+            malformed = json.loads((root / "gates.json").read_text(encoding="utf-8"))
+            malformed["historical_reproduction"] = "passed"
+            write_json(root / "gates.json", malformed)
+            self.assertEqual(make_report(root)["gates"]["status"], "FAIL")
+
+    def test_cpu_only_e_plan_is_not_run_and_overall_incomplete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_json(root / "env.json", {"ok": True, "probe": {}})
+            write_json(root / "gates.json", {
+                "ok": True,
+                "suites": [{"name": name, "ok": True} for name in ("default", "gpu", "slow")],
+            })
+            write_json(root / "matrix_plan.json", {
+                "axes": {"E": {"status": "not_run", "reason": "No NVIDIA GPU detected"}},
+            })
+            result = make_report(root)
+            self.assertEqual(result["gates"]["status"], "PASS")
+            self.assertEqual(result["outcomes"]["E"]["status"], "NOT_RUN")
+            self.assertIn("No NVIDIA GPU detected", result["outcomes"]["E"]["source"])
+            self.assertEqual(result["overall_status"], "INCOMPLETE")
+
     def test_report_documents_affinity_and_vram_estimate_limits(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -324,6 +500,29 @@ class ReportTests(unittest.TestCase):
                                                               role="basis_gpu", case_id="bg"))
             result = make_report(root)
             self.assertEqual(result["outcomes"]["E"]["status"], "PASS")
+
+    def test_axis_e_unclassified_family_uses_strict_gpu_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); receipts = root / "receipts"; receipts.mkdir()
+            write_json(root / "matrix_plan.json", {"axes": {"E": {
+                "expected_ports": [{"design": "design_a", "port": "PortA"}]}}})
+            write_json(receipts / "cpu.json", receipt(axis="A", family="unknown",
+                                                       role="cpu_reference", case_id="cpu",
+                                                       z=[1 + 0j, 1 + 0j]))
+            for jobs in (1, 2, 4, 8):
+                write_json(receipts / f"gpu{jobs}.json",
+                           receipt(axis="E", family="unknown", backend="cudss", threads=2,
+                                   jobs=jobs, role="gpu_candidate", case_id=f"gpu{jobs}",
+                                   z=[1 + 5e-8, 1 + 5e-8]))
+            write_json(receipts / "basis_cpu.json",
+                       receipt(axis="E", family="unknown", role="basis_cpu", case_id="bc"))
+            write_json(receipts / "basis_gpu.json",
+                       receipt(axis="E", family="unknown", backend="cudss", threads=2,
+                               role="basis_gpu", case_id="bg"))
+            result = make_report(root)
+            self.assertEqual(result["outcomes"]["E"]["status"], "FAIL")
+            self.assertTrue(any("strict unclassified" in failure
+                                for failure in result["outcomes"]["E"]["failures"]))
 
 
 class ConverterTests(unittest.TestCase):

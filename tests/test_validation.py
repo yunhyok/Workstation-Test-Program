@@ -281,7 +281,7 @@ def _baseline_args(tmp_path):
 
 
 def _patch_baseline(monkeypatch, tmp_path, *, stopped=False, comparison=None):
-    settings = SimpleNamespace(root=tmp_path, laptop_receipts=None)
+    settings = SimpleNamespace(root=tmp_path, laptop_receipts=None, configuration_mode="manual")
     monkeypatch.setattr(validate, "load_settings", lambda root: settings)
     monkeypatch.setattr(validate, "_measurement_prepare", lambda *a, **k: (settings, {}, "fingerprint"))
     monkeypatch.setattr(validate, "_ports_for", lambda *a, **k: [("design_a", "PortA")])

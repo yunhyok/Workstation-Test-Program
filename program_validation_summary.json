@@ -1,63 +1,75 @@
 {
   "schema_version": 1,
   "kind": "program_release_validation",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "release_state": "PR_CANDIDATE_OWNER_MERGE_REQUIRED",
-  "created_at": "2026-09-21T23:49:31.901079+00:00",
+  "created_at": "2026-09-29T07:45:48.329928+00:00",
   "program_status": "PASS",
-  "validation_scope": "local source and Windows installer checks",
+  "validation_scope": "source, isolated numerical runtime, real user-data conversion, installed Windows workflow",
   "workstation_study_status": "NOT_RUN",
-  "base_commit": "f6549eae0b39e3cb9ea918aef84a66a1c33b7d6c",
-  "engine_changes": 0,
-  "engine_worker_changes": 0,
+  "engine_source_changes": 0,
+  "numerical_options_changes": 0,
   "preregistration_changes": 0,
   "preregistration_sha256": "e58b32f68749c75c24054477bb4a4f80f2b5935fdfd14047eff7f16a282de004",
   "program_pytest": {
-    "tests": 96,
+    "tests": 132,
     "failures": 0,
     "errors": 0,
     "skipped": 0
   },
+  "standalone": {
+    "runtime_isolation": "PASS with hostile PYTHONHOME/PYTHONPATH/PYTHONUSERBASE",
+    "folder_only_preparation": "PASS",
+    "real_design_count": 3,
+    "real_port_count": 344,
+    "conversion_against_existing_references": [
+      {
+        "ports": 92,
+        "frequencies": 826,
+        "max_relative_error": 3.149670177474223e-15
+      },
+      {
+        "ports": 160,
+        "frequencies": 626,
+        "max_relative_error": 6.062648492002806e-15
+      },
+      {
+        "ports": 92,
+        "frequencies": 826,
+        "max_relative_error": 3.124692328466829e-15
+      }
+    ],
+    "installed_cpu_gpu_runtime_and_inputs_gate": "PASS",
+    "historical_reproduction_gates": "NOT_RUN",
+    "single_port_numerical_check": {
+      "frequency_count": 27,
+      "cpu_gpu_max_relative_error": 3.1258130179413805e-11,
+      "cpu_gpu_tolerance": 1e-08,
+      "cpu_vs_previously_verified_worker_relative_error": 2.7034424072480316e-13,
+      "cpu_regression_tolerance": 1e-09
+    }
+  },
   "self_checks": {
     "validation": "PASS",
     "agent": "PASS",
-    "agent_real_env_roundtrip": "PASS"
-  },
-  "external_engine_env": {
-    "source": "PASS",
-    "packaged": "PASS",
-    "hard_version_mismatches": 0
-  },
-  "cpu_fixture_regression": {
-    "frequency_count": 27,
-    "frequency_grid_identical": true,
-    "max_relative_error": 3.231881322361924e-12,
-    "tolerance": 1e-09,
-    "pass": true,
-    "scope": "one existing CPU fixture through the actual engine worker",
-    "verified_in_version": "1.0.1",
-    "worker_unchanged": true,
-    "rerun_for_current_version": false
+    "touchstone_converter": "PASS",
+    "gui": "PASS"
   },
   "installed_checks": {
-    "version": "PASS",
+    "version": "1.2.0",
+    "isolated_runtime": "PASS",
+    "folder_prepare": "PASS",
+    "env": "PASS",
+    "gates": "PASS",
     "gui_render": "PASS",
-    "validation_selfcheck": "PASS",
-    "agent_selfcheck": "PASS",
     "uninstall": "PASS",
     "study_data_preserved": "PASS"
   },
-  "bundled_source_files_verified": 10,
   "installer": {
-    "file": "Workstation-Test-Program-1.1.0-Setup-x64.exe",
-    "bytes": 11138054,
-    "sha256": "fad5a58b541d0ed559b5aad9c7c0bace2768bf7075a94953db62808a81e736dd",
+    "file": "Workstation-Test-Program-1.2.0-Setup-x64.exe",
+    "bytes": 1875062716,
+    "sha256": "54fece14376f86ca7aceed19e8b627aeba48050c5e78f7edf42d7d38e58dc1cf",
     "signed": false
-  },
-  "full_engine_gates": {
-    "default": "NOT_RUN",
-    "gpu": "NOT_RUN",
-    "slow": "NOT_RUN"
   },
   "workstation_matrix": {
     "A": "NOT_RUN",
@@ -67,31 +79,6 @@
     "E": "NOT_RUN",
     "F": "NOT_RUN"
   },
-  "remaining_hardware_validation": "Target workstation gates and numerical matrix require the owner-provided machine and data.",
-  "operational_limits": [
-    "Graceful cancellation prevents new port launches and waits for every in-flight port in the batch.",
-    "Lowest-n logical CPU affinity may bias NUMA, CCD, and SMT comparisons.",
-    "VRAM is estimated from whole-device peak minus five-sample idle median, divided by concurrency."
-  ],
-  "previous_release": {
-    "version": "1.0.0",
-    "program_pytest_passed": 47,
-    "installer_sha256": "9fab6defd779df7ce31431a2540b90d2aef8bf17a2c5e4f0465990aab6f8a85a"
-  },
-  "evidence_report": "docs/engine/BATCH_RUN_20260922.md",
-  "batch": {
-    "ordered_stages": 10,
-    "runner_regression_tests": 12,
-    "gui_regression_tests": 10,
-    "real_engine_env_source": "PASS",
-    "real_engine_env_packaged": "PASS",
-    "gui_button_interactions": "PASS",
-    "full_workstation_campaign": "NOT_RUN"
-  },
-  "review_fixes_report": "docs/engine/REVIEW_FIXES_20260921.md",
-  "previous_converter_self_check": {
-    "version": "1.0.1",
-    "status": "PASS",
-    "implementation_unchanged": true
-  }
+  "remaining_hardware_validation": "Full campaign on target workstation; existing preregistered reproduction requires manual mode.",
+  "evidence_report": "docs/engine/STANDALONE_20260929.md"
 }
