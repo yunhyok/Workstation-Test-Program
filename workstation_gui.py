@@ -36,6 +36,9 @@ class Window:
         self.last_batch = None
         self.preparation_data: dict = {}
         self.master.title("Workstation Test Program")
+        icon = Path(__file__).resolve().parent / "assets" / "workstation.ico"
+        if os.name == "nt" and icon.is_file():
+            self.master.iconbitmap(default=str(icon))
         width = min(1100, self.master.winfo_screenwidth() - 80)
         height = min(860, self.master.winfo_screenheight() - 140)
         self.master.geometry(f"{width}x{height}+20+20")
@@ -137,7 +140,7 @@ class Window:
         self.stage_button.grid(row=0, column=1, sticky="w")
         ttk.Label(automatic, text="전체: env → gates → baseline(P9·P92) → matrix(B–E) → converge(P92) → report\n"
                   "자동 실행은 등록된 조건을 사용합니다. 위 포트·축 선택은 수동 실행에만 적용됩니다.\n"
-                  "전체 측정은 수 시간 이상 걸릴 수 있습니다. 실패·중단 시 다음 단계는 실행하지 않습니다.",
+                  "독립된 단계는 실패 후에도 계속합니다. 필수 검증 실패 시 종속 측정은 건너뛰며, 중단 요청은 전체 실행에 적용됩니다.",
                   wraplength=800).grid(row=1, column=0, columnspan=2, sticky="w", pady=(7, 0))
         buttons = ttk.Frame(self.run_tab)
         buttons.pack(fill="x", pady=10)
@@ -146,6 +149,10 @@ class Window:
         ttk.Button(buttons, text="실행 중 포트 완료 후 중단", command=lambda: self.stop(False)).pack(side="left", padx=8)
         ttk.Button(buttons, text="즉시 중단", command=lambda: self.stop(True)).pack(side="left")
         ttk.Button(buttons, text="결과 폴더", command=self.open_root).pack(side="right")
+        self.export_button = ttk.Button(buttons, text="결과 ZIP 저장", command=self.export_results)
+        self.export_button.pack(side="right", padx=8)
+        ttk.Label(self.run_tab, text="자동 실행·보고서 종료 시 결과 ZIP을 작업 폴더의 exports에 저장합니다.",
+                  wraplength=850).pack(anchor="w")
         self.status = tk.StringVar(value="준비 · 전체 실험 버튼으로 등록된 모든 단계를 순차 실행할 수 있습니다.")
         ttk.Label(self.run_tab, textvariable=self.status, wraplength=850).pack(anchor="w", pady=5)
         self.progress = ttk.Progressbar(self.run_tab, mode="determinate")
@@ -431,7 +438,7 @@ class Window:
         self.launch(["batch", "--stage", stage], "전체 실험" if stage == "all" else f"{stage} 전체 조건")
 
     def _set_busy(self, busy: bool):
-        for button in (self.start_button, self.batch_button, self.stage_button):
+        for button in (self.start_button, self.batch_button, self.stage_button, self.export_button):
             button.configure(state="disabled" if busy else "normal")
         for widget in self.setting_widgets:
             widget.configure(state="disabled" if busy else "normal")
@@ -444,14 +451,16 @@ class Window:
         from ws_validate import batch_plan
         steps = batch_plan(stage) if steps is None else steps
         self.plan_label.set(f"실행 계획 · {'전체 실험' if stage == 'all' else stage} · {len(steps)}단계")
-        states = {"pending": "대기", "running": "실행 중", "completed": "완료", "failed": "실패", "stopped": "중단"}
+        states = {"pending": "대기", "running": "실행 중", "completed": "완료", "failed": "실패",
+                  "stopped": "중단", "skipped": "선행 조건 미충족"}
         existing = self.plan_tree.get_children()
         if list(existing) != [step["id"] for step in steps]:
             self.plan_tree.delete(*existing)
             for step in steps:
                 self.plan_tree.insert("", "end", iid=step["id"])
         for index, step in enumerate(steps, 1):
-            self.plan_tree.item(step["id"], values=(f"{index}. {step['label']}", states.get(step.get("state"), "대기")))
+            reason = f" · {step['error']}" if step.get("error") else ""
+            self.plan_tree.item(step["id"], values=(f"{index}. {step['label']}{reason}", states.get(step.get("state"), "대기")))
             if step.get("state") == "running":
                 self.plan_tree.see(step["id"])
 
@@ -501,6 +510,12 @@ class Window:
             self._set_busy(False)
             messagebox.showerror("실행 실패", str(exc))
 
+    def export_results(self):
+        if self.child and self.child.poll() is None:
+            return
+        self.pending_launch = None
+        self._spawn(runner_command() + ["export", "--root", str(self.root)], "결과 ZIP 저장", "export")
+
     def _finish_child(self, code: int):
         kind = self.child_kind
         pending = self.pending_launch
@@ -530,6 +545,12 @@ class Window:
                 self.launch(pending[0], pending[1], prepared=True)
             return
         self.pending_launch = None
+        if kind == "export" and code == 0:
+            try:
+                record = json.loads((self.root / "export.json").read_text(encoding="utf-8"))
+                messagebox.showinfo("결과 ZIP 저장 완료", str(record.get("path") or self.root / "exports"))
+            except (OSError, ValueError):
+                messagebox.showinfo("결과 ZIP 저장 완료", str(self.root / "exports"))
         if code:
             self.status.set(f"종료 코드 {code} · 로그에서 원인을 확인하세요.")
 
@@ -559,11 +580,12 @@ class Window:
                     if batch != self.last_batch:
                         self.show_plan(batch["stage"], batch["steps"])
                         self.last_batch = batch
-                    self.status.set(f"{state} · 단계 {batch['completed']} / {batch['total']} 완료 · "
+                    self.status.set(f"{state} · 처리 {batch.get('finished', batch['completed'])} / {batch['total']} · "
+                                    f"완료 {batch['completed']} · 실패 {batch.get('failed', 0)} · 건너뜀 {batch.get('skipped', 0)} · "
                                     f"{data.get('current_case') or batch.get('current_id') or ''} · "
                                     f"현재 단계 계산 {complete} / {complete + remaining}")
                 if batch:
-                    self.progress.configure(maximum=max(batch["total"], 1), value=batch["completed"])
+                    self.progress.configure(maximum=max(batch["total"], 1), value=batch.get("finished", batch["completed"]))
                 elif isinstance(complete, int) and isinstance(remaining, int):
                     self.progress.configure(maximum=max(complete + remaining, 1), value=complete)
             logs = sorted((self.root / "runs").glob("*/log.txt"))

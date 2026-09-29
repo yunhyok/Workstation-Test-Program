@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "1.2.0"
+  #define AppVersion "1.3.0"
 #endif
 [Setup]
 AppId={{AC051B97-5D45-4E44-97D6-577D57211AD0}
@@ -19,6 +19,7 @@ Compression=lzma2/fast
 LZMANumBlockThreads=4
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\assets\workstation.ico
 UninstallDisplayIcon={app}\WorkstationTestProgram.exe
 CloseApplications=yes
 RestartApplications=no

@@ -1,4 +1,4 @@
-param([string]$Python = "python", [string]$ISCC = "iscc", [string]$Version = "1.2.0",
+param([string]$Python = "python", [string]$ISCC = "iscc", [string]$Version = "1.3.0",
       [string]$EngineRoot = "")
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot

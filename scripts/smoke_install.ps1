@@ -1,4 +1,4 @@
-param([string]$Installer = "dist/installer/Workstation-Test-Program-1.2.0-Setup-x64.exe",
+param([string]$Installer = "dist/installer/Workstation-Test-Program-1.3.0-Setup-x64.exe",
       [string]$DataDir = "", [string]$PreparedStudyRoot = "")
 $ErrorActionPreference = "Stop"
 $projectRoot = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
@@ -34,6 +34,34 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Installed validation self-check failed" }
     & $cliPath agent --self-check
     if ($LASTEXITCODE -ne 0) { throw "Installed agent self-check failed" }
+    & $cliPath validate batch --stage env --root $studyRoot
+    if ($LASTEXITCODE -ne 1) { throw "Unconfigured diagnostic batch must fail explicitly" }
+    $automaticExport = Get-Content -LiteralPath (Join-Path $studyRoot 'export.json') -Raw | ConvertFrom-Json
+    if (-not $automaticExport.success -or -not (Test-Path -LiteralPath $automaticExport.path)) {
+        throw "Failed batch did not create a diagnostic ZIP"
+    }
+    $statusBeforeExport = (Get-FileHash -LiteralPath (Join-Path $studyRoot 'status.json') -Algorithm SHA256).Hash
+    & $cliPath validate export --root $studyRoot
+    if ($LASTEXITCODE -ne 0) { throw "Installed standalone result export failed" }
+    if ((Get-FileHash -LiteralPath (Join-Path $studyRoot 'status.json') -Algorithm SHA256).Hash -ne $statusBeforeExport) {
+        throw "Manual export overwrote measurement status"
+    }
+    $exportCheck = @'
+import json, sys, zipfile
+from pathlib import Path
+root = Path(sys.argv[1])
+archives = list((root / 'exports').glob('*.zip'))
+assert len(archives) == 2
+for archive in archives:
+    with zipfile.ZipFile(archive) as bundle:
+        assert bundle.testzip() is None
+        assert json.loads(bundle.read('status.json'))['running'] is False
+        assert json.loads(bundle.read('status.json'))['exit_code'] == 1
+        assert json.loads(bundle.read('manifest.json'))['overall_status'] == 'FAIL'
+print('Installed failure ZIP and manual export PASS')
+'@
+    & $runtimePython -c $exportCheck $studyRoot
+    if ($LASTEXITCODE -ne 0) { throw "Installed ZIP contents verification failed" }
     if ($DataDir) {
         $validationRoot = $studyRoot
         if ($PreparedStudyRoot) {
@@ -61,4 +89,4 @@ try {
 }
 if (-not (Test-Path -LiteralPath (Join-Path $studyRoot "preserve.txt"))) { throw "Uninstall deleted study evidence" }
 if (Test-Path -LiteralPath $cliPath) { throw "Uninstall did not remove the installed CLI" }
-Write-Output "PASS: install, GUI/CLI/self-checks, uninstall, preserved study data. Evidence: $smokeRoot"
+Write-Output "PASS: install, GUI/CLI/self-checks, failure ZIP, manual export, uninstall, preserved study data. Evidence: $smokeRoot"

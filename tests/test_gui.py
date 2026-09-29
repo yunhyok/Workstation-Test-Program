@@ -267,6 +267,36 @@ def test_finished_batch_shows_full_progress_instead_of_empty_last_step(window):
     assert progress[-1] == {"maximum": 10, "value": 10}
 
 
+def test_failed_and_skipped_steps_count_as_processed_not_successful(window):
+    progress = []
+    window.progress = SimpleNamespace(configure=lambda **values: progress.append(values))
+    window.last_batch = None
+    atomic_json(window.root / "status.json", {
+        "running": False, "exit_code": 1,
+        "batch": {"stage": "all", "completed": 2, "failed": 1, "skipped": 7,
+                  "finished": 10, "total": 10, "steps": []},
+    })
+    window.refresh()
+    assert progress[-1] == {"maximum": 10, "value": 10}
+    assert "완료 2" in window.status.get() and "실패 1" in window.status.get()
+    assert "건너뜀 7" in window.status.get()
+
+
+def test_export_needs_no_data_folder_and_preserves_stop_and_measurement_state(window, monkeypatch):
+    spawned = []
+    monkeypatch.setattr(window, "_spawn", lambda *args: spawned.append(args))
+    window.fields["data_dir"].set("")
+    stop = window.root / "gui-stop.request"
+    stop.write_text("now")
+    atomic_json(window.root / "status.json", {"running": False, "exit_code": 1})
+    before = (window.root / "status.json").read_bytes()
+    window.export_results()
+    assert spawned == [(gui.runner_command() + ["export", "--root", str(window.root)],
+                        "결과 ZIP 저장", "export")]
+    assert stop.read_text() == "now"
+    assert (window.root / "status.json").read_bytes() == before
+
+
 @pytest.mark.parametrize("now,expected", [(False, "graceful"), (True, "now")])
 def test_batch_stop_reaches_shared_request_file(window, now, expected):
     window.child = SimpleNamespace(poll=lambda: None)

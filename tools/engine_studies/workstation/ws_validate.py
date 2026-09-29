@@ -37,7 +37,7 @@ from common import (RunLock, Settings, atomic_json, input_identity, load_setting
                     compare_receipt_vectors, bundled_runtime, engine_paths)
 
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 HARD_VERSIONS = {"python": "3.12.10", "numpy": "2.4.4", "scipy": "1.18.0"}
 REFERENCE_VERSIONS = {
     **HARD_VERSIONS, "matplotlib": "3.10.9",
@@ -63,6 +63,7 @@ class Status:
             "subcommand": command, "started_at": utc_now(), "updated_at": utc_now(),
             "current_case": None, "completed": 0, "remaining": 0, "total": 0,
             "comparison": None, "exit_code": None, "stopped_at": None, "error": None,
+            "export_error": None,
         }
         self._last = 0.0
         self.write(force=True)
@@ -1120,6 +1121,22 @@ def command_report(args, status: Status, run_dir: Path, log) -> int:
     return 0
 
 
+def _export_results(root: Path) -> Path:
+    """Load the stdlib-only bundle writer only when an export is requested."""
+    from result_bundle import export_results
+    return export_results(root)
+
+
+def _record_export_failure(root: Path, exc: BaseException) -> str:
+    error = f"{type(exc).__name__}: {exc}"
+    atomic_json(root / "export.json", {
+        "schema_version": 1, "created_at": utc_now(), "path": None,
+        "success": False, "error": error, "snapshot_state": "partial",
+        "overall_status": "FAIL",
+    })
+    return error
+
+
 def batch_plan(stage: str = "all") -> list[dict[str, Any]]:
     """Return a fresh, public description of the sequential validation campaign."""
     plan = [
@@ -1146,13 +1163,25 @@ def command_batch(args, status: Status, run_dir: Path, log) -> int:
     plan = batch_plan(args.stage)
     steps = [{**step, "argv": list(step["argv"]), "state": "pending", "exit_code": None,
               "run_dir": None, "error": None} for step in plan]
-    batch = {"stage": args.stage, "completed": 0, "total": len(steps),
+    batch = {"stage": args.stage, "completed": 0, "passed": 0, "failed": 0,
+             "skipped": 0, "finished": 0, "total": len(steps),
              "current_id": None, "steps": steps}
     started_at = utc_now()
 
+    def refresh_counts() -> None:
+        batch["passed"] = sum(step["state"] == "completed" for step in steps)
+        batch["failed"] = sum(step["state"] == "failed" for step in steps)
+        batch["skipped"] = sum(step["state"] == "skipped" for step in steps)
+        batch["finished"] = sum(step["state"] in {"completed", "failed", "skipped", "stopped"}
+                                for step in steps)
+        # Keep the established field for existing GUI readers; it means successful steps.
+        batch["completed"] = batch["passed"]
+
     def persist(*, running: bool, exit_code: int | None) -> None:
+        refresh_counts()
         batch_error = next((step["error"] for step in steps
-                            if step["state"] in {"failed", "stopped"} and step["error"]), None)
+                            if step["state"] in {"failed", "stopped", "skipped"}
+                            and step["error"]), None)
         status.update(force=True, batch=batch, error=batch_error)
         atomic_json(args.root / "batch_status.json", {
             "schema_version": 1, "version": VERSION, "updated_at": utc_now(),
@@ -1162,6 +1191,9 @@ def command_batch(args, status: Status, run_dir: Path, log) -> int:
 
     persist(running=True, exit_code=None)
     final_code = 0
+    env_passed: bool | None = None
+    gates_passed: bool | None = None
+    measurement_commands = {"baseline", "matrix", "converge"}
     for index, step in enumerate(steps):
         mode = _stop_mode(args.stop_file, args.stop_now)
         if mode:
@@ -1171,6 +1203,31 @@ def command_batch(args, status: Status, run_dir: Path, log) -> int:
             batch["current_id"] = step["id"]
             persist(running=True, exit_code=None)
             break
+
+        command = step["argv"][0]
+        skip_reason = None
+        if args.stage == "all" and command == "gates" and env_passed is not True:
+            skip_reason = "skipped because prerequisite env did not pass"
+        elif (args.stage == "all" and command in measurement_commands
+              and gates_passed is not True):
+            skip_reason = "skipped because prerequisite gates did not pass"
+        if skip_reason:
+            child_run_dir, child_log = _new_run(args.root, f"batch-{step['id']}")
+            step.update(state="skipped", exit_code=None, error=skip_reason,
+                        run_dir=str(child_run_dir))
+            batch["current_id"] = step["id"]
+            child_log.write(skip_reason + "\n")
+            _write_run_summary(child_run_dir, {
+                "command": command, "batch_step_id": step["id"], "finished_at": utc_now(),
+                "exit_code": None, "comparison": None, "error": skip_reason,
+                "skipped": True, "stopped": False,
+            })
+            child_log.close()
+            final_code = 1
+            batch["current_id"] = None
+            persist(running=True, exit_code=None)
+            print(f"batch step {step['id']} skipped: {skip_reason}", file=log)
+            continue
 
         step.update(state="running", error=None)
         batch["current_id"] = step["id"]
@@ -1198,6 +1255,11 @@ def command_batch(args, status: Status, run_dir: Path, log) -> int:
                 if env_record.get("ok") is not True:
                     code = 1
                     error = "env.json did not report ok=true"
+            if child_args.command == "gates" and code == 0:
+                gate_record = read_json(args.root / "gates.json", {})
+                if gate_record.get("ok") is not True:
+                    code = 1
+                    error = "gates.json did not report ok=true"
             if code == 0 and index == len(steps) - 1:
                 mode = _stop_mode(args.stop_file, args.stop_now)
                 if mode:
@@ -1234,9 +1296,12 @@ def command_batch(args, status: Status, run_dir: Path, log) -> int:
         step["exit_code"] = code
         step["error"] = error
         status.value.update(current_case=None, completed=0, remaining=0, total=0)
+        if command == "env":
+            env_passed = code == 0
+        elif command == "gates":
+            gates_passed = code == 0
         if code == 0:
             step["state"] = "completed"
-            batch["completed"] += 1
             batch["current_id"] = None
             persist(running=True, exit_code=None)
             continue
@@ -1244,7 +1309,8 @@ def command_batch(args, status: Status, run_dir: Path, log) -> int:
         final_code = 130 if code == 130 else 1
         persist(running=True, exit_code=None)
         print(f"batch step {step['id']} {step['state']}: {error}", file=log)
-        break
+        if code == 130:
+            break
 
     batch["current_id"] = None
     finished_at = utc_now()
@@ -1255,7 +1321,7 @@ def command_batch(args, status: Status, run_dir: Path, log) -> int:
                                "started_at": started_at, "finished_at": finished_at,
                                "exit_code": final_code,
                                "error": next((step["error"] for step in steps
-                                              if step["state"] in {"failed", "stopped"}), None),
+                                              if step["state"] in {"failed", "stopped", "skipped"}), None),
                                "batch": batch})
     persist(running=False, exit_code=final_code)
     return final_code
@@ -1323,6 +1389,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--data-dir", type=Path, required=True)
     for name in ("env", "gates", "report"):
         child = sub.add_parser(name); _common(child, defaults=False)
+    export = sub.add_parser("export"); _common(export, defaults=False)
     batch = sub.add_parser("batch"); _common(batch, defaults=False)
     batch.add_argument("--stage", choices=("all", "env", "gates", "baseline", "matrix",
                                             "converge", "report"), default="all")
@@ -1363,6 +1430,24 @@ def main(argv=None) -> int:
     args.root.mkdir(parents=True, exist_ok=True)
     if args.stop_file is not None:
         args.stop_file = args.stop_file.expanduser().resolve()
+    if args.command == "export":
+        try:
+            with RunLock(args.root, "export"):
+                try:
+                    archive = _export_results(args.root)
+                except Exception as exc:
+                    try:
+                        export_error = _record_export_failure(args.root, exc)
+                    except Exception as record_exc:
+                        export_error = (f"{type(exc).__name__}: {exc}; could not record export "
+                                        f"failure: {type(record_exc).__name__}: {record_exc}")
+                    print(export_error, file=sys.stderr)
+                    return 1
+            print(str(archive))
+            return 0
+        except Exception as exc:
+            print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+            return 1
     code = 1
     error = None
     stopped = False
@@ -1389,6 +1474,22 @@ def main(argv=None) -> int:
                                                  "error": error, "stopped": stopped})
                 status.finish(code, error=error, stopped=stopped)
                 log.close()
+            if args.command in {"batch", "report"}:
+                try:
+                    archive = _export_results(args.root)
+                    print(str(archive))
+                except Exception as exc:
+                    try:
+                        export_error = _record_export_failure(args.root, exc)
+                    except Exception as record_exc:
+                        export_error = (f"{type(exc).__name__}: {exc}; could not record export "
+                                        f"failure: {type(record_exc).__name__}: {record_exc}")
+                    if code == 0:
+                        code = 1
+                    status.update(force=True, running=False, exit_code=code,
+                                  export_error=export_error,
+                                  error=status.value.get("error") or export_error)
+                    print(f"result export failed: {export_error}", file=sys.stderr)
     except Exception as exc:
         code, error = 1, f"{type(exc).__name__}: {exc}"
         print(error, file=sys.stderr)
