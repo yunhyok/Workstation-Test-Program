@@ -75,7 +75,7 @@ class DataSetupTests(unittest.TestCase):
         design_id, design = next(iter(result["designs"].items()))
         self.assertEqual(design["family"], "unknown")
         self.assertEqual(design["ports"], ["PortA", "PortB", "PortC"])
-        self.assertTrue(Path(design["reference"]).is_relative_to(self.root / "prepared-data"))
+        self.assertTrue(Path(design["reference"]).is_relative_to((self.root / "prepared-data").resolve()))
         self.assertEqual(calls[0][1], [
             "PortA::VDD_A/0", "PortB::VDD_B/1", "PortC::VDD_C/0",
         ])
