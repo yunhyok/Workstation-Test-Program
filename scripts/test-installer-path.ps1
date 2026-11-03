@@ -11,11 +11,13 @@ function Invoke-Installer([string]$Path, [string]$Arguments) {
     if ($process.ExitCode -ne 0) { throw "Installer failed: $Path ($($process.ExitCode))" }
 }
 try {
+    & (Join-Path $PSScriptRoot 'Test-InstallerWizard.ps1') -Setup $Installer -Mode '/ALLUSERS'
     Invoke-Installer $Installer "/CURRENTUSER /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=`"$target`" /LOG=`"$root\fresh.log`""
     $uninstaller = Join-Path $target 'unins000.exe'
     if (!(Test-Path -LiteralPath $uninstaller)) { throw 'Custom destination was not used.' }
     Invoke-Installer $Installer "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG=`"$root\reinstall.log`""
     if (!(Test-Path -LiteralPath $uninstaller)) { throw 'Reinstall did not preserve the custom destination.' }
+    & (Join-Path $PSScriptRoot 'Test-InstallerWizard.ps1') -Setup $Installer -Mode '/CURRENTUSER' -ExpectedDirectory $target
     $log = Get-Content -LiteralPath (Join-Path $root 'reinstall.log') -Raw
     if (!$log.Contains($target)) { throw 'Reinstall log does not record the custom destination.' }
     if ((Get-Content -LiteralPath $marker -Raw) -cne 'preserve-me') { throw 'Reinstall changed user data.' }
