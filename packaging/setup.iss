@@ -7,10 +7,14 @@ AppName=Workstation Test Program
 AppVersion={#AppVersion}
 AppPublisher=yunhyok
 AppPublisherURL=https://github.com/yunhyok/Workstation-Test-Program
-DefaultDirName={localappdata}\Programs\Workstation Test Program
+DisableDirPage=no
+UsePreviousAppDir=yes
+UsePreviousPrivileges=yes
+DefaultDirName={autopf}\Workstation Test Program
 DefaultGroupName=Workstation Test Program
 DisableProgramGroupPage=yes
-PrivilegesRequired=lowest
+PrivilegesRequired=admin
+PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\dist\installer
@@ -35,4 +39,4 @@ Name: "{group}\Workstation Test Program"; Filename: "{app}\WorkstationTestProgra
 Name: "{group}\Usage guide"; Filename: "{app}\_internal\README.md"
 Name: "{autodesktop}\Workstation Test Program"; Filename: "{app}\WorkstationTestProgram.exe"; Tasks: desktopicon
 [Run]
-Filename: "{app}\WorkstationTestProgram.exe"; Description: "Launch Workstation Test Program"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\WorkstationTestProgram.exe"; Description: "Launch Workstation Test Program"; Flags: nowait postinstall skipifsilent runasoriginaluser
