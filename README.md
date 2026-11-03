@@ -175,3 +175,7 @@ CPU/GPU 수치 라이브러리는 설치 파일에 중복 포함하지 않고 �
 사전 등록: [W15_PLAN_20260921.md](docs/engine/W15_PLAN_20260921.md).
 구현/검사 증거: [W15_REPORT.md](https://github.com/yunhyok/Workstation-Test-Program/blob/main/docs/engine/W15_REPORT.md).
 서브에이전트가 실행부, 원격 제어, 보고서/변환기를 분담했으며 통합 검사는 주 에이전트가 수행합니다.
+
+## Installer 1.0.1
+
+The destination page is shown on fresh installs and reinstalls, with a Browse button for another drive or folder. New all-user installs default to Windows Program Files. Existing install mode, selected path and user settings are preserved. Choosing the current-user mode keeps its per-user default and needs no administrator rights.

@@ -1,0 +1,60 @@
+name: Installer release
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: New patch tag matching this source
+        required: true
+        type: string
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build requirements
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements-dev.txt -r requirements-build.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
+          choco install innosetup --version=6.4.3 --yes --no-progress --allow-downgrade
+          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed.' }
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6"
+          $iscc | Out-File -FilePath $env:GITHUB_PATH -Append
+      - name: Run tests
+        shell: pwsh
+        run: |
+          python -m pytest tests -q
+          python app.py validate --self-check
+          python app.py agent --self-check
+          if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
+      - name: Build installer
+        shell: pwsh
+        run: ./scripts/build_windows.ps1 -Version 1.0.1
+      - name: Verify custom destination and reinstall
+        shell: pwsh
+        run: ./scripts/test-installer-path.ps1 -Installer dist/installer/Workstation-Test-Program-1.0.1-Setup-x64.exe
+      - name: Prepare verified release assets
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory release-assets -Force | Out-Null
+          Copy-Item dist/installer/Workstation-Test-Program-1.0.1-Setup-x64.exe release-assets/
+          Get-ChildItem release-assets -File | ForEach-Object { "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)" } | Set-Content release-assets/SHA256SUMS.txt -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Workstation-Test-Program-1.0.1-installers
+          path: release-assets/*
+          if-no-files-found: error
+      - name: Publish new patch release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_TAG -cne 'v1.0.1') { throw 'release_tag must match the source version.' }
+          gh release create $env:RELEASE_TAG (Get-ChildItem release-assets -File).FullName --target $env:GITHUB_SHA --title "Workstation-Test-Program $env:RELEASE_TAG" --generate-notes
+          if ($LASTEXITCODE -ne 0) { throw 'Release failed.' }
