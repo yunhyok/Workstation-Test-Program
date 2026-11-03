@@ -21,9 +21,8 @@ jobs:
         run: |
           python -m pip install -r requirements-dev.txt -r requirements-build.txt
           if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
-          choco install innosetup --version=6.4.3 --yes --no-progress --allow-downgrade
-          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed.' }
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6"
+          if (!(Test-Path (Join-Path $iscc 'ISCC.exe'))) { throw 'Inno Setup 6 is missing from the Windows runner.' }
           $iscc | Out-File -FilePath $env:GITHUB_PATH -Append
       - name: Run tests
         shell: pwsh
