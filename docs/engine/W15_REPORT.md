@@ -51,7 +51,7 @@ Windows GUI, 검증 CLI, LAN 에이전트/클라이언트, Touchstone 변환기,
 위의 35개 테스트는 아래의 **전체 엔진 게이트 3종을 대신하지 않는다.**
 프로그램은 필수 재현 테스트가 skip되거나 엔진·버전·입력이 바뀐 경우 측정을 허용하지 않는다.
 설치본은 PyInstaller 6.20.0과 Inno Setup 7.0.1-beta로 빌드했다. 파일 해시는 저장소 루트의
-`summary.json`과 릴리스의 `SHA256SUMS.txt`에 기록했다. 실행부·원격 제어·보고서/변환기를
+`program_validation_summary.json`과 릴리스의 `SHA256SUMS.txt`에 기록했다. 실행부·원격 제어·보고서/변환기를
 서브에이전트 3개가 분담했고 주 에이전트가 소스·통합 검사·최종 설치본을 검증했다.
 
 Touchstone 원본 세 종류를 제품 파서와 S→Z 변환으로 처리해 기존 NPZ와
@@ -82,7 +82,7 @@ Touchstone 원본 세 종류를 제품 파서와 S→Z 변환으로 처리해 �
 보고서는 자료가 없으면 NOT_RUN/INCOMPLETE로 표시한다. 없는 벽시계/RSS/VRAM 측정으로
 그래프를 만들지 않았다. 실제 영수증이 쌓인 뒤 `validate report`가
 `figures/w15_wall_jobs_threads.png`, `w15_rss_unknowns.png`, `w15_vram_jobs.png`를 생성한다.
-저장소의 `summary.json`은 배포 검증 요약이며 워크스테이션 연구 영수증이 아니다.
+저장소의 `program_validation_summary.json`은 배포 검증 요약이며 워크스테이션 연구 영수증이 아니다.
 
 ## 5. 플래너 상수 제안값
 

@@ -3,8 +3,13 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: New patch tag matching this source
+        description: Release tag matching this source (v1.4.0)
         required: true
+        type: string
+      engine_ref:
+        description: Ref in yunhyok/spd-decap-pi-evaluator to bundle
+        required: false
+        default: main
         type: string
 permissions:
   contents: write
@@ -13,18 +18,29 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: app
+      - uses: actions/checkout@v4
+        with:
+          repository: yunhyok/spd-decap-pi-evaluator
+          ref: ${{ inputs.engine_ref }}
+          path: engine
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - name: Install build requirements
+          python-version: '3.12.10'
+      - name: Install build and pinned runtime requirements
+        working-directory: app
         shell: pwsh
         run: |
-          python -m pip install -r requirements-dev.txt -r requirements-build.txt
+          $pinned = python -c "import scripts.bundle_runtime as b; print(' '.join(f'{k}=={v}' for k, v in sorted(b.PINNED.items())))"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read pinned runtime versions.' }
+          python -m pip install -r requirements-dev.txt -r requirements-build.txt ($pinned -split ' ')
           if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6"
           if (!(Test-Path (Join-Path $iscc 'ISCC.exe'))) { throw 'Inno Setup 6 is missing from the Windows runner.' }
           $iscc | Out-File -FilePath $env:GITHUB_PATH -Append
       - name: Run tests
+        working-directory: app
         shell: pwsh
         run: |
           python -m pytest tests -q
@@ -32,28 +48,34 @@ jobs:
           python app.py agent --self-check
           if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
       - name: Build installer
+        working-directory: app
         shell: pwsh
-        run: ./scripts/build_windows.ps1 -Version 1.0.1
-      - name: Verify custom destination and reinstall
+        run: ./scripts/build_windows.ps1 -Version 1.4.0 -EngineRoot ../engine
+      - name: Verify custom destination, reinstall, and smoke checks
+        working-directory: app
         shell: pwsh
-        run: ./scripts/test-installer-path.ps1 -Installer dist/installer/Workstation-Test-Program-1.0.1-Setup-x64.exe
+        run: |
+          ./scripts/test-installer-path.ps1 -Installer dist/installer/Workstation-Test-Program-1.4.0-Setup-x64.exe
+          ./scripts/smoke_install.ps1 -Installer dist/installer/Workstation-Test-Program-1.4.0-Setup-x64.exe
       - name: Prepare verified release assets
+        working-directory: app
         shell: pwsh
         run: |
           New-Item -ItemType Directory release-assets -Force | Out-Null
-          Copy-Item dist/installer/Workstation-Test-Program-1.0.1-Setup-x64.exe release-assets/
+          Copy-Item dist/installer/Workstation-Test-Program-1.4.0-Setup-x64.exe release-assets/
           Get-ChildItem release-assets -File | ForEach-Object { "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)" } | Set-Content release-assets/SHA256SUMS.txt -Encoding ascii
       - uses: actions/upload-artifact@v4
         with:
-          name: Workstation-Test-Program-1.0.1-installers
-          path: release-assets/*
+          name: Workstation-Test-Program-1.4.0-installers
+          path: app/release-assets/*
           if-no-files-found: error
-      - name: Publish new patch release
+      - name: Publish release
+        working-directory: app
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
         shell: pwsh
         run: |
-          if ($env:RELEASE_TAG -cne 'v1.0.1') { throw 'release_tag must match the source version.' }
+          if ($env:RELEASE_TAG -cne 'v1.4.0') { throw 'release_tag must match the source version.' }
           gh release create $env:RELEASE_TAG (Get-ChildItem release-assets -File).FullName --target $env:GITHUB_SHA --title "Workstation-Test-Program $env:RELEASE_TAG" --generate-notes
           if ($LASTEXITCODE -ne 0) { throw 'Release failed.' }

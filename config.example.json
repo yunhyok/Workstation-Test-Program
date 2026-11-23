@@ -1,7 +1,36 @@
 {
-  "engine_python": "C:\\Python312\\python.exe",
-  "engine_root": "C:\\Projects\\spd-decap-pi-evaluator",
-  "data_dir": "D:\\SPD-Data",
-  "laptop_receipts": "D:\\Laptop-Receipts",
-  "laptop_freeze": "D:\\Laptop-Receipts\\laptop_pip_freeze_system_python.txt"
+  "engine_python": "C:/Python312/python.exe",
+  "engine_root": "C:/Projects/owner-provided-engine",
+  "data_dir": "D:/Design-Data",
+  "laptop_receipts": null,
+  "laptop_freeze": null,
+  "designs": {
+    "design_a": {
+      "spd": "design_a.spd",
+      "reference": "design_a_Zdiag.npz",
+      "family": "package"
+    }
+  },
+  "port_sets": {
+    "P9": {
+      "design_a": [
+        "PortA"
+      ]
+    },
+    "P20": {
+      "design_a": [
+        "PortA",
+        "PortB"
+      ]
+    },
+    "P92": {
+      "design_a": "all"
+    },
+    "E4": {
+      "design_a": [
+        "PortB"
+      ]
+    }
+  },
+  "configuration_mode": "manual"
 }

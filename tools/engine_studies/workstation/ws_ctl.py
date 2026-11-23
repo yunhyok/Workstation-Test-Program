@@ -24,6 +24,9 @@ EXIT_REMOTE = 7
 EXIT_STOPPED = 10
 EXIT_FAILED = 11
 EXIT_WATCH_NETWORK = 12
+MIN_TOKEN_LENGTH = 32
+PUBLIC_ARTIFACT_FILES = {"summary.json", "program_validation_summary.json", "gates.json",
+                         "matrix_plan.json"}
 
 
 class ClientError(Exception):
@@ -41,6 +44,8 @@ def read_token(path: Path) -> str:
         raise ClientError(f"cannot read token file {path}: {exc}", EXIT_USAGE) from exc
     if not token or "\n" in token or "\r" in token:
         raise ClientError("token file must contain one non-empty token", EXIT_USAGE)
+    if len(token) < MIN_TOKEN_LENGTH:
+        raise ClientError(f"token must contain at least {MIN_TOKEN_LENGTH} characters", EXIT_USAGE)
     return token
 
 
@@ -200,8 +205,12 @@ def _atomic_no_overwrite(data: bytes, out_dir: Path, relative: PurePosixPath) ->
         except FileExistsError as exc:
             raise ClientError(f"refusing to overwrite {destination}", EXIT_CONFLICT) from exc
         except OSError as exc:
-            # Same-directory hard links should work on supported workstation filesystems.
-            raise ClientError(f"cannot publish download atomically: {exc}", EXIT_REMOTE) from exc
+            if destination.exists():
+                raise ClientError(f"refusing to overwrite {destination}", EXIT_CONFLICT) from exc
+            try:
+                os.replace(temp, destination)
+            except OSError:
+                raise ClientError(f"cannot publish download atomically: {exc}", EXIT_REMOTE) from exc
     finally:
         try:
             temp.unlink()
@@ -273,7 +282,8 @@ def main(argv: list[str] | None = None) -> int:
             result = client.request("POST", "/stop", {"mode": "now" if args.now else "graceful"})
         elif command == "fetch":
             relative = _safe_relative(args.name)
-            if len(relative.parts) == 1 and relative.suffix.lower() == ".json" and relative.name not in {"summary.json"}:
+            if (len(relative.parts) == 1 and relative.suffix.lower() == ".json"
+                    and relative.name not in PUBLIC_ARTIFACT_FILES):
                 endpoint = "/receipt/" + quote(relative.name, safe="")
                 output_relative = PurePosixPath(relative.name)
             else:

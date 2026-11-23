@@ -1,0 +1,5 @@
+# Application icon
+
+`workstation.png` is the original transparent asset generated with the built-in imagegen tool for this application. `workstation.ico` contains Windows sizes 16, 24, 32, 48, 64, 128 and 256 pixels, converted from that asset with Pillow. The icon is used by both executables, the installer, shortcuts and the Tk window.
+
+Prompt: "Create one production-ready Windows desktop application icon for Workstation Test Program, a scientific CPU/GPU workstation validation and electrical impedance test application. A simple bold professional app mark: a dark navy workstation monitor silhouette with a clean bright cyan measurement waveform in its screen and a small integrated teal microchip element at lower right. Modern flat vector-like geometric design, strongly legible at 16 to 48 pixels, generous thick shapes, restrained navy/cyan/teal palette. Centered single icon filling about 85 percent of square canvas, transparent background outside the silhouette. No text, no letters, no numbers, no watermark, no perspective mockup, no surrounding scene. Sharp edges, polished balanced composition. Deliver a single square icon asset."

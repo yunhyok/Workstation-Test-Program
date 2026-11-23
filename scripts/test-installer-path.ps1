@@ -1,7 +1,8 @@
-param([Parameter(Mandatory=$true)][string]$Installer)
+﻿param([Parameter(Mandatory=$true)][string]$Installer)
 $ErrorActionPreference = 'Stop'
 $Installer = (Resolve-Path -LiteralPath $Installer).Path
-$root = Join-Path $env:RUNNER_TEMP ('installer-path-' + [Guid]::NewGuid().ToString('N'))
+$tempBase = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
+$root = Join-Path $tempBase ('installer-path-' + [Guid]::NewGuid().ToString('N'))
 $target = Join-Path $root 'custom folder 한글'
 New-Item -ItemType Directory -Path $target -Force | Out-Null
 $marker = Join-Path $target 'preserved-user-setting.txt'
@@ -11,7 +12,9 @@ function Invoke-Installer([string]$Path, [string]$Arguments) {
     if ($process.ExitCode -ne 0) { throw "Installer failed: $Path ($($process.ExitCode))" }
 }
 try {
-    & (Join-Path $PSScriptRoot 'Test-InstallerWizard.ps1') -Setup $Installer -Mode '/ALLUSERS'
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $initialMode = if ($isAdmin) { '/ALLUSERS' } else { '/CURRENTUSER' }
+    & (Join-Path $PSScriptRoot 'Test-InstallerWizard.ps1') -Setup $Installer -Mode $initialMode
     Invoke-Installer $Installer "/CURRENTUSER /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=`"$target`" /LOG=`"$root\fresh.log`""
     $uninstaller = Join-Path $target 'unins000.exe'
     if (!(Test-Path -LiteralPath $uninstaller)) { throw 'Custom destination was not used.' }
@@ -27,4 +30,5 @@ try {
 } finally {
     $uninstaller = Join-Path $target 'unins000.exe'
     if (Test-Path -LiteralPath $uninstaller) { Invoke-Installer $uninstaller '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' }
+    if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
 }

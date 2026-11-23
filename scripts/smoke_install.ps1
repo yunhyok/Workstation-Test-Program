@@ -1,4 +1,5 @@
-param([string]$Installer = "dist/installer/Workstation-Test-Program-1.0.0-Setup-x64.exe")
+param([string]$Installer = "dist/installer/Workstation-Test-Program-1.4.0-Setup-x64.exe",
+      [string]$DataDir = "", [string]$PreparedStudyRoot = "")
 $ErrorActionPreference = "Stop"
 $projectRoot = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
 $installerPath = (Resolve-Path -LiteralPath (Join-Path $projectRoot $Installer)).Path
@@ -7,18 +8,28 @@ $installationRoot = [IO.Path]::GetFullPath((Join-Path $smokeRoot "app"))
 if (-not $installationRoot.StartsWith($projectRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
     throw "Smoke installation target must stay inside the project workspace."
 }
-$appRegistry = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{AC051B97-5D45-4E44-97D6-577D57211AD0}_is1"
-if (Test-Path -LiteralPath $appRegistry) { throw "The application is already installed; refusing to replace that installation in a smoke test." }
+foreach ($appRegistry in @(
+    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{AC051B97-5D45-4E44-97D6-577D57211AD0}_is1",
+    "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{AC051B97-5D45-4E44-97D6-577D57211AD0}_is1"
+)) {
+    if (Test-Path -LiteralPath $appRegistry) { throw "The application is already installed; refusing to replace that installation in a smoke test." }
+}
 New-Item -ItemType Directory -Path $smokeRoot -Force | Out-Null
 $studyRoot = Join-Path $smokeRoot "study"
 New-Item -ItemType Directory -Path $studyRoot | Out-Null
 Set-Content -LiteralPath (Join-Path $studyRoot "preserve.txt") -Value "Study evidence must survive uninstall."
-$installArgs = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", ('/DIR="' + $installationRoot + '"'), ('/LOG="' + (Join-Path $smokeRoot "install.log") + '"'))
+$installArgs = @("/CURRENTUSER", "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", ('/DIR="' + $installationRoot + '"'), ('/LOG="' + (Join-Path $smokeRoot "install.log") + '"'))
 $process = Start-Process -FilePath $installerPath -ArgumentList $installArgs -WindowStyle Hidden -PassThru -Wait
 if ($process.ExitCode -ne 0) { throw "Silent installer failed: $($process.ExitCode)" }
 $cliPath = Join-Path $installationRoot "WorkstationTest.exe"
+$installedRuntime = Join-Path $installationRoot "engine-runtime"
+$runtimePython = Join-Path $installedRuntime "python.exe"
+$runtimeVerifier = Join-Path $projectRoot "scripts/bundle_runtime.py"
 $uninstaller = Join-Path $installationRoot "unins000.exe"
 try {
+    if (-not (Test-Path -LiteralPath $runtimePython)) { throw "Installed runtime python.exe is missing" }
+    & $runtimePython $runtimeVerifier --verify-only $installedRuntime
+    if ($LASTEXITCODE -ne 0) { throw "Installed isolated runtime verification failed" }
     & $cliPath --version
     if ($LASTEXITCODE -ne 0) { throw "Installed CLI did not launch" }
     & $cliPath gui --smoke --root $studyRoot
@@ -27,6 +38,49 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Installed validation self-check failed" }
     & $cliPath agent --self-check
     if ($LASTEXITCODE -ne 0) { throw "Installed agent self-check failed" }
+    & $cliPath validate batch --stage env --root $studyRoot
+    if ($LASTEXITCODE -ne 1) { throw "Unconfigured diagnostic batch must fail explicitly" }
+    $automaticExport = Get-Content -LiteralPath (Join-Path $studyRoot 'export.json') -Raw | ConvertFrom-Json
+    if (-not $automaticExport.success -or -not (Test-Path -LiteralPath $automaticExport.path)) {
+        throw "Failed batch did not create a diagnostic ZIP"
+    }
+    $statusBeforeExport = (Get-FileHash -LiteralPath (Join-Path $studyRoot 'status.json') -Algorithm SHA256).Hash
+    & $cliPath validate export --root $studyRoot
+    if ($LASTEXITCODE -ne 0) { throw "Installed standalone result export failed" }
+    if ((Get-FileHash -LiteralPath (Join-Path $studyRoot 'status.json') -Algorithm SHA256).Hash -ne $statusBeforeExport) {
+        throw "Manual export overwrote measurement status"
+    }
+    $exportCheck = @'
+import json, sys, zipfile
+from pathlib import Path
+root = Path(sys.argv[1])
+archives = list((root / 'exports').glob('*.zip'))
+assert len(archives) == 2
+for archive in archives:
+    with zipfile.ZipFile(archive) as bundle:
+        assert bundle.testzip() is None
+        assert json.loads(bundle.read('status.json'))['running'] is False
+        assert json.loads(bundle.read('status.json'))['exit_code'] == 1
+        assert json.loads(bundle.read('manifest.json'))['overall_status'] == 'FAIL'
+print('Installed failure ZIP and manual export PASS')
+'@
+    & $runtimePython -c $exportCheck $studyRoot
+    if ($LASTEXITCODE -ne 0) { throw "Installed ZIP contents verification failed" }
+    if ($DataDir) {
+        $validationRoot = $studyRoot
+        if ($PreparedStudyRoot) {
+            $validationRoot = (Resolve-Path -LiteralPath $PreparedStudyRoot).Path
+            if (-not $validationRoot.StartsWith((Join-Path $projectRoot 'output') + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Prepared integration study must be under the project output directory."
+            }
+        }
+        & $cliPath validate prepare --root $validationRoot --data-dir $DataDir
+        if ($LASTEXITCODE -ne 0) { throw "Installed folder preparation failed" }
+        & $cliPath validate env --root $validationRoot
+        if ($LASTEXITCODE -ne 0) { throw "Installed engine environment check failed" }
+        & $cliPath validate gates --root $validationRoot
+        if ($LASTEXITCODE -ne 0) { throw "Installed CPU/GPU and input gates failed" }
+    }
 } finally {
     if (Test-Path -LiteralPath $uninstaller) {
         $resolvedUninstaller = (Resolve-Path -LiteralPath $uninstaller).Path
@@ -39,4 +93,4 @@ try {
 }
 if (-not (Test-Path -LiteralPath (Join-Path $studyRoot "preserve.txt"))) { throw "Uninstall deleted study evidence" }
 if (Test-Path -LiteralPath $cliPath) { throw "Uninstall did not remove the installed CLI" }
-Write-Output "PASS: install, GUI/CLI/self-checks, uninstall, preserved study data. Evidence: $smokeRoot"
+Write-Output "PASS: install, GUI/CLI/self-checks, failure ZIP, manual export, uninstall, preserved study data. Evidence: $smokeRoot"

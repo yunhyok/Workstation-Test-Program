@@ -1,13 +1,13 @@
 # 워크스테이션 도구
 
-설치·외부 엔진 준비·LAN 방화벽·중단·재개·회수 방법은 저장소 루트의
+설치·데이터 폴더 준비·LAN 방화벽·중단·재개·회수 방법은 저장소 루트의
 [README](../../../README.md)에 있습니다.
 
-- `ws_validate.py`: env/gates/baseline/matrix/converge/compare/report 및 --self-check
+- `ws_validate.py`: prepare/env/gates/baseline/matrix/converge/compare/report 및 --self-check
 - `ws_agent.py`: 고정 HTTP 엔드포인트, Bearer 인증, 단일 작업 실행
 - `ws_ctl.py`: 노트북 원격 제어, --json 자동화 출력
 - `touchstone_to_zdiag.py`: 제품 Touchstone 파서 기반 참조 변환
-- `engine_worker.py`: 외부 Python 환경에서 엔진 공개 API 호출
+- `engine_worker.py`: 내장 Python 런타임에서 엔진 공개 API 호출 (수동 외부 환경도 지원)
 - `study_report.py`: 영수증 비교와 한국어 보고서/그림
 
 소스 실행: `python tools/engine_studies/workstation/ws_validate.py --help`.
@@ -25,12 +25,12 @@
   "schema_version": 1,
   "verified": true,
   "receipts": {
-    "port1.json": {
+    "port_a.json": {
       "sha256": "원본 JSON 파일의 실제 SHA-256 64자리",
       "numerics_id": "동일 옵션의 재현으로 확인한 실제 수치 ID",
-      "design": "260729",
+      "design": "design_a",
       "family": "package",
-      "port": "Port1_SITE0",
+      "port": "PortA",
       "backend": "splu",
       "threads": 4,
       "jobs": 1,
